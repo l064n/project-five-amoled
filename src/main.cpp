@@ -45,6 +45,9 @@ static uint32_t g_frames = 0;
 static uint32_t g_fpsStart = 0;
 static int      g_fps = 0;
 
+// Frame freeze (used to capture a clean frame over serial as a PNG).
+static volatile bool g_freeze = false;
+
 // Minimal 3x5 digit font (rows of 3 bits, LSB = leftmost pixel) for FPS HUD.
 static const uint8_t kDigit[10][5] = {
     {0b111,0b101,0b101,0b101,0b111}, // 0
@@ -121,6 +124,7 @@ static void renderTask(void *arg)
 {
     (void)arg;
     for (;;) {
+        if (g_freeze) { vTaskDelay(5); continue; } // hold frame for capture
         uint32_t t = millis();
         renderAndPush(t);
         g_frames++;
@@ -169,9 +173,42 @@ void setup()
     xTaskCreatePinnedToCore(renderTask, "render", 4096, nullptr, 2, nullptr, 1);
 }
 
+// Stream the current framebuffer over USB-serial so a host can save a PNG.
+// Protocol (big-endian):  magic 'FRM1' | u16 W | u16 H | W*H RGB565 bytes.
+static void sendFrameOverSerial()
+{
+    g_freeze = true;
+    delay(30); // let render task hold a settled frame
+    uint32_t n = (uint32_t)engine.W * engine.H;
+    uint8_t hdr[8] = { 'F','R','M','1',
+                       (uint8_t)(engine.W >> 8), (uint8_t)(engine.W & 0xFF),
+                       (uint8_t)(engine.H >> 8), (uint8_t)(engine.H & 0xFF) };
+    Serial.write(hdr, sizeof(hdr));
+    for (uint32_t i = 0; i < n; i++) {
+        uint16_t c = engine.fb[i];
+        Serial.write((uint8_t)(c & 0xFF));        // low byte first (LE)
+        Serial.write((uint8_t)(c >> 8));
+    }
+    g_freeze = false;
+}
+
+static void processSerialCommands()
+{
+    while (Serial.available() > 0) {
+        char c = (char)Serial.read();
+        if (c == 'F' || c == 'f') {
+            sendFrameOverSerial();
+        } else if (c == 'P' || c == 'p') {
+            scene.nextPalette();
+            Serial.printf("[serial] palette %s\n", scene.pal().name);
+        }
+    }
+}
+
 // -------------------------------------------------------------------------
 void loop()
 {
+    processSerialCommands();
     // Poll touch (non-blocking) and drive rotation.
     int16_t x = -1, y = -1;
     bool down = touch.read(x, y);

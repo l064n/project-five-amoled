@@ -81,6 +81,34 @@ a tiny, dependency-free renderer:
 The scene is immediate-mode: `clear` → draw stars → draw grid → draw knot →
 draw HUD → blit the whole frame to the panel via `lcd_PushColors`.
 
+## Serial commands
+
+Send these characters over the USB-serial monitor to control the running demo:
+
+| Char | Effect |
+| --- | --- |
+| `F` / `f` | Freeze the frame and **stream the framebuffer over serial** (for screenshot capture) |
+| `P` / `p` | Advance to the next color palette |
+
+## Screenshots
+
+`scripts/capture_frame.py` triggers a frame dump over serial and saves it as a
+PNG (pure Python, no dependencies). The PNGs in [`captures/`](captures) are
+captured directly from the on-screen framebuffer.
+
+```sh
+# needs pyserial on the python you run it with (PlatformIO's venv has it)
+python scripts/capture_frame.py my_shot      # -> captures/my_shot.png
+python scripts/capture_frame.py cyber        # after sending 'P' to switch palette
+```
+
+| Palette | Capture |
+| --- | --- |
+| SUNSET (magenta) | `captures/amoled_neon_3d.png` |
+| CYBER (cyan) | `captures/amoled_neon_cyber.png` |
+| LIME (green) | `captures/amoled_neon_lime.png` |
+| SOLAR (orange) | `captures/amoled_neon_solar.png` |
+
 ## Key pins (see `lib/amoled/pins_config.h` + `touch_cst816.h`)
 
 | Function | GPIO |
