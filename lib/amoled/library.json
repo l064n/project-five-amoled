@@ -1,0 +1,12 @@
+{
+    "name": "LilyGO-T-Display-S3-AMOLED",
+    "version": "1.0.0",
+    "description": "RM67162 QSPI AMOLED display driver for the LilyGO T-Display-S3-AMOLED (240x536). Vendored from the official LilyGO factory example.",
+    "keywords": "amoled, esp32s3, lilygo, rm67162, qspi, display",
+    "authors": {
+        "name": "LilyGO (vendored)"
+    },
+    "license": "MIT",
+    "frameworks": "arduino",
+    "platforms": "espressif32"
+}
