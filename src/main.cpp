@@ -1,226 +1,211 @@
 /*
- * LilyGO T-Display-S3-AMOLED — starter demo
+ * T-Display-S3-AMOLED — NEON 3D interactive demo
  *
- * Boots the RM67162 QSPI AMOLED (240x536) and runs a small LVGL UI:
- * a title label, a live clock, and a color swatch row. This proves the
- * full stack: USB-CDC serial, QSPI display driver, and LVGL rendering.
+ * A self-contained software 3D engine renders a neon torus knot over a
+ * synthwave perspective grid and a parallax starfield on the AMOLED black.
  *
- * Flash with:  pio run -t upload
- * Monitor:     pio device monitor
+ * Interactions (CST816 capacitive touch):
+ *   * Drag anywhere to rotate the scene (with inertia / momentum).
+ *   * Tap (quick, no movement) to switch the neon color palette.
+ *
+ * Everything is immediate-mode: render into a PSRAM framebuffer, then blit
+ * the whole frame to the panel each tick.
+ *
+ * Build:  pio run -t upload
  */
 
 #include <Arduino.h>
-#include <lvgl.h>
+#include <math.h>
 
-#include "rm67162.h"     // local amoled driver
-#include "pins_config.h" // board pin map (buttons, LED, etc.)
+#include "rm67162.h"          // display driver
+#include "pins_config.h"
+#include "touch_cst816.h"     // capacitive touch
+#include "engine3d.h"         // software 3D engine
+#include "scene.h"            // neon scene
 
-// Pack a raw RGB565 value into an lv_color_t (LVGL 8.x, 16-bit color depth).
-static inline lv_color_t c565(uint16_t v)
-{
-    lv_color_t c;
-    c.full = v;
-    return c;
-}
+// -------------------------------------------------------------------------
+static Engine3D engine;
+static Scene    scene(engine);
+static CST816   touch;
 
-// ---------------------------------------------------------------------------
-// Display + LVGL globals
-// ---------------------------------------------------------------------------
-static lv_disp_draw_buf_t draw_buf;
-static lv_disp_drv_t       disp_drv;
-static lv_color_t         *buf;
+// Camera angles (radians) controlled by touch.
+static float g_rx = 0.20f;
+static float g_ry = 0.00f;
+static float g_velRx = 0.0f;
+static float g_velRy = 0.0f;
 
-static lv_obj_t *clock_label = nullptr;
+// Touch state.
+static int16_t  g_lastX = -1, g_lastY = -1;
+static bool     g_wasDown = false;
+static uint32_t g_downMs = 0;
+static float    g_moved = 0.0f;
 
-// 16-bit full frame in PSRAM (240 * 536 * 2 bytes ~= 254 KB)
-#define LVGL_BUF_PIXELS (TFT_WIDTH * TFT_HEIGHT)
+// FPS tracking.
+static uint32_t g_frames = 0;
+static uint32_t g_fpsStart = 0;
+static int      g_fps = 0;
 
-// ---------------------------------------------------------------------------
-// LVGL flush: blit the rendered area to the AMOLED
-// ---------------------------------------------------------------------------
-static void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
-{
-    (void)disp;
-    uint32_t w = (uint32_t)(area->x2 - area->x1 + 1);
-    uint32_t h = (uint32_t)(area->y2 - area->y1 + 1);
-    lcd_PushColors(area->x1, area->y1, w, h, (uint16_t *)&color_p->full);
-    lv_disp_flush_ready(&disp_drv);
-}
-
-// ---------------------------------------------------------------------------
-// Button wiring (user buttons on the board)
-//   BTN1 = GPIO0 (bootside), BTN2 = GPIO21
-// A short click cycles the demo background color; a long press toggles
-// the backlight LED on IO38 (onboard LED on the non-touch variant).
-// ---------------------------------------------------------------------------
-static const uint16_t bg_colors[] = {
-    0x0000, 0xF800, 0x07E0, 0x001F, 0xFFE0, 0x120F, 0xFC00, 0x7BEF,
+// Minimal 3x5 digit font (rows of 3 bits, LSB = leftmost pixel) for FPS HUD.
+static const uint8_t kDigit[10][5] = {
+    {0b111,0b101,0b101,0b101,0b111}, // 0
+    {0b010,0b110,0b010,0b010,0b111}, // 1
+    {0b111,0b001,0b111,0b100,0b111}, // 2
+    {0b111,0b001,0b111,0b001,0b111}, // 3
+    {0b101,0b101,0b111,0b001,0b001}, // 4
+    {0b111,0b100,0b111,0b001,0b111}, // 5
+    {0b111,0b100,0b111,0b101,0b111}, // 6
+    {0b111,0b001,0b001,0b001,0b001}, // 7
+    {0b111,0b101,0b111,0b101,0b111}, // 8
+    {0b111,0b101,0b111,0b001,0b111}, // 9
 };
-static uint8_t bg_index = 0;
 
-static void set_bg(uint16_t rgb565)
+static void drawDigit(int x, int y, int d, int r, int g, int b)
 {
-    lv_obj_set_style_bg_color(lv_scr_act(), c565(rgb565), 0);
+    for (int row = 0; row < 5; row++)
+        for (int col = 0; col < 3; col++)
+            if (kDigit[d][row] & (1 << (2 - col)))
+                engine.addPixel(x + col, y + row, r, g, b);
 }
 
-static void on_btn1_click()
+static void drawInt(int x, int y, int val, int r, int g, int b)
 {
-    bg_index = (bg_index + 1) % (sizeof(bg_colors) / sizeof(bg_colors[0]));
-    set_bg(bg_colors[bg_index]);
-    Serial.printf("[btn1] background -> %d\n", bg_index);
+    if (val < 0) val = 0; if (val > 999) val = 999;
+    int digits = (val >= 100) ? 3 : (val >= 10 ? 2 : 1);
+    for (int i = 0; i < digits; i++) {
+        int place = (int)powf(10.0f, (float)(digits - 1 - i));
+        drawDigit(x + i * 4, y, (val / place) % 10, r, g, b);
+    }
 }
 
-static void on_btn1_long()
+// Top-center palette indicator: one dot per palette, active is lit.
+static void drawPaletteDots()
 {
-    static bool led_on = true;
-    led_on = !led_on;
-    digitalWrite(PIN_LED, led_on ? HIGH : LOW);
-    Serial.printf("[btn1] long press -> LED %s\n", led_on ? "ON" : "OFF");
+    const Scene::Palette &P = scene.pal();
+    int n = Scene::NUM_PALETTES;
+    int startX = (engine.W - (n * 10)) / 2;
+    for (int i = 0; i < n; i++) {
+        int cx = startX + i * 10 + 4;
+        int cy = 8;
+        if (i == scene.paletteIndex)
+            engine.drawNeonDot(cx, cy, P.line_r, P.line_g, P.line_b, 3);
+        else
+            engine.drawNeonDot(cx, cy, 70, 70, 70, 1);
+    }
 }
 
-static void on_btn2_click()
+// -------------------------------------------------------------------------
+static void renderAndPush(uint32_t t_ms)
 {
-    lcd_setRotation(0); // toggle-ish: reset to portrait
-    Serial.println("[btn2] reset rotation");
+    // Apply inertia when not dragging.
+    if (!g_wasDown) {
+        g_rx += g_velRx;
+        g_ry += g_velRy;
+        g_velRx *= 0.94f;
+        g_velRy *= 0.94f;
+        if (g_rx > 1.3f)  g_rx = 1.3f;
+        if (g_rx < -0.4f) g_rx = -0.4f;
+    }
+
+    // HUD drawn last so it stays crisp on top.
+    scene.render(g_rx, g_ry, t_ms);
+    drawPaletteDots();
+    drawInt(engine.W - 30, engine.H - 12, g_fps,
+            scene.pal().line_r, scene.pal().line_g, scene.pal().line_b);
+
+    // Blit the full framebuffer to the AMOLED (240x536).
+    lcd_PushColors(0, 0, engine.W, engine.H, engine.fb);
 }
 
-// ---------------------------------------------------------------------------
-// LVGL tick: increment the internal clock every 5 ms from a dedicated task
-// ---------------------------------------------------------------------------
-static void lvgl_tick_task(void *arg)
+// Dedicated render task on core 1 to keep display + 3D off the loop core.
+static void renderTask(void *arg)
 {
     (void)arg;
     for (;;) {
-        lv_tick_inc(5);
-        vTaskDelay(pdMS_TO_TICKS(5));
+        uint32_t t = millis();
+        renderAndPush(t);
+        g_frames++;
+
+        // FPS once per second.
+        if (t - g_fpsStart >= 1000) {
+            g_fps = (int)(g_frames * 1000.0f / (float)(t - g_fpsStart));
+            g_frames = 0;
+            g_fpsStart = t;
+        }
+        // ~60 Hz budget; sleep the remainder to be cooperative.
+        uint32_t elapsed = millis() - t;
+        uint32_t target = 16;
+        if (elapsed < target) vTaskDelay(pdMS_TO_TICKS(target - elapsed));
+        else vTaskDelay(1);
     }
 }
 
-// ---------------------------------------------------------------------------
-// setup / loop
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------
 void setup()
 {
     Serial.begin(115200);
-    delay(500);
-    Serial.println("\n========================================");
-    Serial.println(" LilyGO T-Display-S3-AMOLED  (LVGL demo)");
-    Serial.println("========================================");
+    delay(300);
+    Serial.println("\n=== T-Display-S3-AMOLED NEON 3D ===");
 
-    // Onboard LED: IO38 is the LED on the non-touch variant.
     pinMode(PIN_LED, OUTPUT);
     digitalWrite(PIN_LED, HIGH);
 
-    // --- AMOLED ---
+    // Display.
     rm67162_init();
-    lcd_setRotation(0); // portrait, 240 x 536
+    lcd_setRotation(0); // portrait 240x536
 
-    // --- LVGL ---
-    lv_init();
-    buf = (lv_color_t *)ps_malloc(sizeof(lv_color_t) * LVGL_BUF_PIXELS);
-    if (!buf) {
-        Serial.println("FATAL: could not allocate LVGL draw buffer in PSRAM");
-        for (;;)
-            ;
-    }
-    lv_disp_draw_buf_init(&draw_buf, buf, NULL, LVGL_BUF_PIXELS);
-
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = TFT_WIDTH; // 240
-    disp_drv.ver_res = TFT_HEIGHT; // 536
-    disp_drv.flush_cb = my_disp_flush;
-    disp_drv.draw_buf = &draw_buf;
-    lv_disp_drv_register(&disp_drv);
-
-    // LVGL tick driver: dedicated task calls lv_tick_inc every 5 ms
-    xTaskCreatePinnedToCore(lvgl_tick_task, "lvgl_tick", 2048, nullptr, 1, nullptr, 0);
-
-    // --- UI ---
-    set_bg(bg_colors[0]);
-
-    // Title
-    lv_obj_t *title = lv_label_create(lv_scr_act());
-    lv_label_set_text(title, "T-Display S3\nAMOLED");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
-    lv_obj_set_style_text_color(title, lv_color_white(), 0);
-
-    // Live clock (updated in loop)
-    clock_label = lv_label_create(lv_scr_act());
-    lv_label_set_text(clock_label, "--:--:--");
-    lv_obj_align(clock_label, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_text_color(clock_label, lv_color_white(), 0);
-
-    // Sub-hint
-    lv_obj_t *hint = lv_label_create(lv_scr_act());
-    lv_label_set_text(hint, "BTN1: color / long: LED\nBTN2: rotation");
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
-    lv_obj_set_style_text_color(hint, lv_color_make(200, 200, 200), 0);
-
-    // Color swatch row
-    for (int i = 0; i < (int)(sizeof(bg_colors) / sizeof(bg_colors[0])); i++) {
-        lv_obj_t *sw = lv_obj_create(lv_scr_act());
-        lv_obj_set_size(sw, 20, 20);
-        lv_obj_set_pos(sw, 8 + i * 24, TFT_HEIGHT - 60);
-        lv_obj_set_style_bg_color(sw, c565(bg_colors[i]), 0);
-        lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, 0);
-        lv_obj_clear_flag(sw, LV_OBJ_FLAG_SCROLLABLE);
+    // Touch.
+    if (touch.begin()) {
+        touch.setOrientation(CST816::PORTRAIT);
+        Serial.println("[touch] CST816 online (SDA=3, SCL=2)");
+    } else {
+        Serial.println("[touch] no CST816 detected — drag disabled");
     }
 
-    // --- Buttons (interrupt-free polling via OneButton is optional;
-    //      here we poll the user buttons directly in loop()).
-    pinMode(PIN_BUTTON_1, INPUT_PULLUP);
-    pinMode(PIN_BUTTON_2, INPUT_PULLUP);
+    // Engine + scene.
+    engine.begin(TFT_WIDTH, TFT_HEIGHT);
+    scene.begin();
+
+    g_fpsStart = millis();
+    xTaskCreatePinnedToCore(renderTask, "render", 4096, nullptr, 2, nullptr, 1);
 }
 
-// Simple edge-detected button polling with long-press for BTN1
-static uint32_t btn1_down_ms = 0;
-static bool     btn1_long_fired = false;
-static bool     btn1_was_pressed = false;
-
+// -------------------------------------------------------------------------
 void loop()
 {
-    uint32_t now = millis();
+    // Poll touch (non-blocking) and drive rotation.
+    int16_t x = -1, y = -1;
+    bool down = touch.read(x, y);
 
-    // --- Button 1: click = next color, long (>= 600 ms) = toggle LED ---
-    bool btn1_now = (digitalRead(PIN_BUTTON_1) == LOW);
-    if (btn1_now && !btn1_was_pressed) {
-        btn1_down_ms = now;
-        btn1_long_fired = false;
-    }
-    if (btn1_now && !btn1_long_fired && (now - btn1_down_ms) >= 600) {
-        btn1_long_fired = true;
-        on_btn1_long();
-    }
-    if (!btn1_now && btn1_was_pressed && !btn1_long_fired) {
-        if ((now - btn1_down_ms) < 600)
-            on_btn1_click();
-    }
-    btn1_was_pressed = btn1_now;
-
-    // --- Button 2: click = reset rotation ---
-    static bool btn2_was = false;
-    bool btn2_now = (digitalRead(PIN_BUTTON_2) == LOW);
-    if (btn2_now && !btn2_was)
-        on_btn2_click();
-    btn2_was = btn2_now;
-
-    // --- LVGL ---
-    lv_timer_handler();
-
-    // --- Clock (update once per second) ---
-    static uint32_t last_sec = 0;
-    uint32_t sec = (now / 1000);
-    if (sec != last_sec) {
-        last_sec = sec;
-        struct tm t = {};
-        time_t tt = time(nullptr);
-        localtime_r(&tt, &t);
-        char s[16];
-        if (t.tm_hour || t.tm_min || t.tm_sec)
-            snprintf(s, sizeof(s), "%02d:%02d:%02d", t.tm_hour, t.tm_min, t.tm_sec);
-        else
-            snprintf(s, sizeof(s), "%04d-%02d-%02d", 1970 + t.tm_year, t.tm_mon + 1, t.tm_mday);
-        lv_label_set_text(clock_label, s);
+    if (down && x >= 0) {
+        if (!g_wasDown) {
+            g_lastX = x; g_lastY = y;
+            g_downMs = millis();
+            g_moved = 0.0f;
+        } else {
+            int dx = (int)x - (int)g_lastX;
+            int dy = (int)y - (int)g_lastY;
+            g_moved += (float)sqrtf((float)dx * dx + (float)dy * dy);
+            // Drag: move the camera; feed momentum.
+            g_ry += dx * 0.011f;
+            g_rx += dy * 0.011f;
+            g_velRy = dx * 0.011f;
+            g_velRx = dy * 0.011f;
+            if (g_rx > 1.3f)  g_rx = 1.3f;
+            if (g_rx < -0.4f) g_rx = -0.4f;
+        }
+        g_lastX = x; g_lastY = y;
+        g_wasDown = true;
+    } else {
+        if (g_wasDown) {
+            // Released: a quick, small move counts as a tap.
+            uint32_t dur = millis() - g_downMs;
+            if (dur < 260 && g_moved < 8.0f) {
+                scene.nextPalette();
+                Serial.printf("[touch] tap -> palette %s\n",
+                              scene.pal().name);
+            }
+            g_wasDown = false;
+        }
     }
 
     delay(5);
