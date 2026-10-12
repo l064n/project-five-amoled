@@ -209,27 +209,47 @@ static void drawPaletteDots()
     }
 }
 
-// Calibration overlay: dim the screen and mark the corner to tap next.
+// Calibration overlay: full-screen slate background + big bright target at the
+// corner to tap next + a progress bar. Deliberately high-contrast — on an
+// AMOLED a near-black "dim" band is invisible, so the whole screen is filled
+// with a mid slate so the user can't miss it.
 static void drawCalibOverlay()
 {
     if (g_calibStep < 0) return;
-    // dim band at top with instruction + progress
-    for (int x = 0; x < engine.W; x++)
-        for (int y = 0; y < 46; y++)
-            engine.fb[y * engine.W + x] = 0x08E7; // dark blue-grey
-    const char *names[4] = { "TOP-LEFT", "TOP-RIGHT", "BOTTOM-LEFT", "BOTTOM-RIGHT" };
-    // draw big target marker at the corner to tap
-    int tx = (int)kCorners[g_calibStep][0], ty = (int)kCorners[g_calibStep][1];
-    engine.drawNeonDot(tx, ty, 255, 255, 255, 6);
-    // instruction line (tiny digits "CAL" not needed; draw progress bar)
-    for (int i = 0; i < 4; i++) {
-        int bx = 8 + i * 14;
-        if (i < g_calibStep)
-            engine.drawNeonDot(bx + 5, 8, 120, 255, 120, 3);
-        else
-            engine.drawNeonDot(bx + 5, 8, 255, 220, 40, (i == g_calibStep) ? 4 : 2);
+
+    // Full-screen slate (~RGB 40,40,80): clearly visible, not blinding.
+    const uint16_t bg = 0x0A5A;
+    for (uint32_t i = 0; i < (uint32_t)engine.W * engine.H; i++)
+        engine.fb[i] = bg;
+
+    // Big bright target at the corner to tap, nudged in from the very edge so
+    // the marker is fully visible.
+    int tx = (int)kCorners[g_calibStep][0];
+    int ty = (int)kCorners[g_calibStep][1];
+    tx = tx < 14 ? 14 : (tx > engine.W - 15 ? engine.W - 15 : tx);
+    ty = ty < 14 ? 14 : (ty > engine.H - 15 ? engine.H - 15 : ty);
+    engine.drawNeonDot(tx, ty, 255, 255, 255, 11);
+
+    // Crosshair arms so the target reads as "tap here" even at a glance.
+    for (int d = 18; d <= 34; d += 2) {
+        engine.addPixel(tx + d, ty, 255, 255, 255);
+        engine.addPixel(tx - d, ty, 255, 255, 255);
+        engine.addPixel(tx, ty + d, 255, 255, 255);
+        engine.addPixel(tx, ty - d, 255, 255, 255);
     }
-    (void)names;
+
+    // Progress: four big dots across the middle — green = done,
+    // amber = current, dim = pending.
+    for (int i = 0; i < 4; i++) {
+        int bx = 40 + i * 47;
+        int by = engine.H / 2;
+        if (i < g_calibStep)
+            engine.drawNeonDot(bx, by, 0, 255, 120, 7);
+        else if (i == g_calibStep)
+            engine.drawNeonDot(bx, by, 255, 220, 40, 8);
+        else
+            engine.drawNeonDot(bx, by, 110, 110, 150, 4);
+    }
 }
 
 // -------------------------------------------------------------------------
