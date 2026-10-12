@@ -265,8 +265,8 @@ static void renderAndPush(uint32_t t_ms)
         g_ry += g_velRy;
         g_velRx *= 0.94f;
         g_velRy *= 0.94f;
-        if (g_rx > 1.3f)  g_rx = 1.3f;
-        if (g_rx < -0.4f) g_rx = -0.4f;
+        if (g_rx > 1.5f)  g_rx = 1.5f;
+        if (g_rx < -1.5f) g_rx = -1.5f;
     }
 
     // HUD drawn last so it stays crisp on top.
@@ -425,20 +425,27 @@ void loop()
         } else {
             int dx = x - g_lastX;
             int dy = y - g_lastY;
-            g_moved += sqrtf((float)dx * dx + (float)dy * dy);
             g_lastX = x;
             g_lastY = y;
 
             if (g_calibStep < 0) {
-                // Normal mode only: drag to rotate + feed momentum.
-                // Model follows the finger: drag right spins it right,
-                // drag down tips it forward (screen y grows downward).
-                g_ry -= dx * 0.020f;
-                g_rx -= dy * 0.020f;
-                g_velRy = -dx * 0.020f;
-                g_velRx = -dy * 0.020f;
-                if (g_rx > 1.3f)  g_rx = 1.3f;
-                if (g_rx < -0.4f) g_rx = -0.4f;
+                // Normal mode: drag to rotate. The model follows the finger
+                // 1:1 via accumulated deltas (telescoping to total movement).
+                // Only act when the finger actually moved: the CST816 repeats
+                // its last point between real motion, and a zero-delta sample
+                // must NOT zero the momentum (that caused mid-drag micro-stalls).
+                if (dx != 0 || dy != 0) {
+                    g_moved += sqrtf((float)dx * dx + (float)dy * dy);
+                    g_ry -= dx * 0.020f;
+                    g_rx -= dy * 0.020f;
+                    g_velRy = -dx * 0.020f;
+                    g_velRx = -dy * 0.020f;
+                    // Wide pitch range so vertical drag doesn't hit a wall.
+                    if (g_rx > 1.5f) g_rx = 1.5f;
+                    if (g_rx < -1.5f) g_rx = -1.5f;
+                }
+            } else {
+                g_moved += sqrtf((float)dx * dx + (float)dy * dy);
             }
         }
         g_wasDown = true;
@@ -470,6 +477,8 @@ void loop()
         }
         g_wasDown = false;
     }
-
-    delay(5);
+    // No fixed delay: loop polls the touch continuously (repeat points are
+    // zero-delta and ignored), so drags are sampled at the CST816's native
+    // event rate with no artificial throttle.
+    yield();
 }
