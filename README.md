@@ -64,6 +64,22 @@ self-contained 3D scene at ~60 Hz on a dedicated FreeRTOS task:
 A small FPS readout (bottom-right) and a palette indicator (top-center) are
 drawn as an overlay each frame.
 
+### Touch calibration
+
+The CST816 reports points in its **own raw frame**, which does not map 1:1 to
+the portrait 240×536 screen (the 1.91" glass is a 550×480 panel mounted at an
+angle, so its active region is a sub-window that must be scaled and mirrored).
+On the very first run the firmware **automatically starts a 4-corner
+calibration**: tap the four highlighted screen corners in order (top-left →
+top-right → bottom-left → bottom-right). The raw values are fit with a
+least-squares **affine transform** and saved to **NVS** (`Preferences`,
+namespace `touch`), so it only needs to be done once.
+
+- Drag/tap are disabled while the calibration overlay is showing.
+- Send `C` over serial at any time to re-run calibration (e.g. after moving
+  the panel or if taps drift).
+- Send `C` twice in quick succession is not needed — a single `C` restarts it.
+
 ## The software 3D engine
 
 [`src/engine3d.h`](src/engine3d.h) / [`src/engine3d.cpp`](src/engine3d.cpp) —

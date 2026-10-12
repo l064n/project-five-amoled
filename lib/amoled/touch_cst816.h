@@ -32,6 +32,11 @@ public:
     // and returns true while a finger is present.
     bool read(int16_t &out_x, int16_t &out_y);
 
+    // Non-blocking poll returning the RAW controller values (unclamped) plus
+    // pressure z. Used for calibrating the screen mapping. Returns true if a
+    // finger is present.
+    bool readRaw(int16_t &raw_x, int16_t &raw_y, int16_t &raw_z);
+
     // Convenience: true if any finger is down right now.
     bool isPressed();
 
