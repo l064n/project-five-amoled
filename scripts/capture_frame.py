@@ -10,8 +10,18 @@ a PNG (pure Python, no third-party deps). Saves to captures/<name>.png
 """
 import sys, time, zlib, struct, serial
 
-PORT = "/dev/cu.usbmodem2101"
+PORT = None  # auto-detected below (ESP32-S3 re-enumerates the device after each flash)
 BAUD = 115200
+
+def find_port():
+    import glob, os
+    if PORT:
+        return PORT
+    # newest of the usbmodem serial ports
+    cands = glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.SLAB*")
+    if not cands:
+        raise SystemExit("No /dev/cu.usbmodem* port found — is the board connected?")
+    return max(cands, key=lambda p: os.path.getmtime(p))
 
 def png_chunk(tag, data):
     c = struct.pack(">I", len(data)) + tag + data
@@ -49,7 +59,9 @@ def rgb565_to_rgb888(buf):
 def main():
     name = sys.argv[1] if len(sys.argv) > 1 else "frame"
     out = f"captures/{name}.png"
-    s = serial.Serial(PORT, BAUD, timeout=1)
+    port = find_port()
+    print(f"Using port {port}")
+    s = serial.Serial(port, BAUD, timeout=1)
     time.sleep(1.0)
     s.reset_input_buffer()
 

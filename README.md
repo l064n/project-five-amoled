@@ -105,6 +105,8 @@ Send these characters over the USB-serial monitor to control the running demo:
 | --- | --- |
 | `F` / `f` | Freeze the frame and **stream the framebuffer over serial** (for screenshot capture) |
 | `P` / `p` | Advance to the next color palette |
+| `C` / `c` | (Re)start the 4-corner touch calibration |
+| `R` / `r` | Debug: print the current **raw** touch reading (`[raw] x= y= z=`). Hold your finger on the screen and send `R` to see live values. |
 
 ## Screenshots
 

@@ -367,6 +367,15 @@ static void processSerialCommands()
             // Start 4-corner calibration.
             g_calibStep = 0;
             Serial.println("[touch] calibration start: tap the highlighted corners in order");
+        } else if (c == 'R' || c == 'r') {
+            // Debug: dump the current raw touch reading. Hold your finger on
+            // the screen and send 'R' to see the live raw X/Y/Z.
+            int16_t rx, ry, rz;
+            bool down = touch.readRaw(rx, ry, rz);
+            if (down)
+                Serial.printf("[raw] down x=%d y=%d z=%d\n", rx, ry, rz);
+            else
+                Serial.println("[raw] no touch");
         }
     }
 }
@@ -418,7 +427,9 @@ void loop()
         uint32_t dur = millis() - g_downMs;
         if (g_calibStep >= 0) {
             // Calibration: a clean, short tap records the current corner.
-            if (dur < 400 && g_moved < 24.0f) {
+            // NOTE: g_moved here is in RAW units (calib not yet valid), so the
+            // movement budget is generous to tolerate normal finger wobble.
+            if (dur < 600 && g_moved < 60.0f) {
                 g_raw[g_calibStep][0] = g_lastRawX;
                 g_raw[g_calibStep][1] = g_lastRawY;
                 Serial.printf("[calib] corner %d raw=(%d,%d)\n",

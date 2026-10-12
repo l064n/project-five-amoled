@@ -8,13 +8,14 @@
 //   SDA -> GPIO3
 //   SCL -> GPIO2
 //
-// Protocol (CST816 family, see datasheet/CST816_Register.pdf in the
-// official LilyGO repo):
-//   Write register pointer 0x00, then read 6 bytes:
-//     x = (b0 << 4) | (b1 >> 4)   // b0 high nibble = valid-flag
-//     y = (b2 << 4) | (b3 >> 4)
-//     z = (b4 << 4) | (b5 >> 4)   // pressure; >0 => finger present
-//   A touch is considered active when z > 0 or the valid-flag bit is set.
+// Protocol (CST816 family) — matches the official LilyGo-AMOLED-Series
+// TouchClassCST816::getPoint(), which reads a 13-byte report from reg 0x00:
+//   b[2]   = touch point count (0 = none, 1 = single touch)
+//   b[3]   = X high (low 4 bits)    b[4] = X low (8 bits)
+//   b[5]   = Y high (low 4 bits)    b[6] = Y low (8 bits)
+//   b[7]   = Z/pressure high        b[8] = Z low
+//   x = (b[3] & 0x0F) << 8 | b[4]      y = (b[5] & 0x0F) << 8 | b[6]
+// A touch is active when the point count == 1.
 //
 #include <Arduino.h>
 #include <Wire.h>
