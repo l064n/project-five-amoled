@@ -20,6 +20,14 @@ struct V3 {
     float x, y, z;
 };
 
+// Precomputed trig for a (rx,ry,rz) rotation. Build once, reuse for many
+// points — avoids re-running cosf/sinf per vertex (the hot cost on ESP32).
+struct Rot {
+    float cy, sy, cx, sx, cz, sz;
+};
+Rot makeRot(float rx, float ry, float rz);
+void rotateMat(float x, float y, float z, const Rot &m, V3 &out);
+
 class Engine3D {
 public:
     int W = 240, H = 536;
@@ -68,6 +76,15 @@ public:
                      float camDist,
                      int r, int g, int b, int intensity,
                      int radius = 1);
+
+    // Fast variants that reuse a precomputed rotation (no per-vertex trig).
+    void renderSegmentMat(const V3 &pa, const V3 &pb, const Rot &m,
+                          float camDist,
+                          int r, int g, int b, int intensity,
+                          int core = 1, int glow = 2);
+    void renderPointMat(const V3 &p, const Rot &m, float camDist,
+                        int r, int g, int b, int intensity,
+                        int radius = 1);
 
     // --- color helpers ---
     static uint16_t rgb565(int r, int g, int b);

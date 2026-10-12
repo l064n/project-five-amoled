@@ -47,6 +47,10 @@ static uint32_t g_frames = 0;
 static uint32_t g_fpsStart = 0;
 static int      g_fps = 0;
 
+// Frame-time accounting (us), printed once per second.
+static uint32_t g_sceneUs = 0;
+static uint32_t g_blitUs = 0;
+
 // Frame freeze (used to capture a clean frame over serial as a PNG).
 static volatile bool g_freeze = false;
 
@@ -266,14 +270,20 @@ static void renderAndPush(uint32_t t_ms)
     }
 
     // HUD drawn last so it stays crisp on top.
+    int64_t t0 = esp_timer_get_time();
     scene.render(g_rx, g_ry, t_ms);
     drawPaletteDots();
     drawInt(engine.W - 30, engine.H - 12, g_fps,
             scene.pal().line_r, scene.pal().line_g, scene.pal().line_b);
     drawCalibOverlay();
+    int64_t t1 = esp_timer_get_time();
 
     // Blit the full framebuffer to the AMOLED (240x536).
     lcd_PushColors(0, 0, engine.W, engine.H, engine.fb);
+    int64_t t2 = esp_timer_get_time();
+
+    g_sceneUs += (uint32_t)(t1 - t0);
+    g_blitUs  += (uint32_t)(t2 - t1);
 }
 
 // Dedicated render task on core 1 to keep display + 3D off the loop core.
@@ -289,7 +299,13 @@ static void renderTask(void *arg)
         // FPS once per second.
         if (t - g_fpsStart >= 1000) {
             g_fps = (int)(g_frames * 1000.0f / (float)(t - g_fpsStart));
+            if (g_frames > 0)
+                Serial.printf("[perf] fps=%d scene=%dms blit=%dms\n",
+                              g_fps, g_sceneUs / g_frames / 1000,
+                              g_blitUs / g_frames / 1000);
             g_frames = 0;
+            g_sceneUs = 0;
+            g_blitUs = 0;
             g_fpsStart = t;
         }
         // ~60 Hz budget; sleep the remainder to be cooperative.

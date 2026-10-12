@@ -92,6 +92,24 @@ void Engine3D::rotate(float x, float y, float z,
     out.x = x2; out.y = y2; out.z = z2;
 }
 
+Rot makeRot(float rx, float ry, float rz)
+{
+    Rot m;
+    m.cy = cosf(ry); m.sy = sinf(ry);
+    m.cx = cosf(rx); m.sx = sinf(rx);
+    m.cz = cosf(rz); m.sz = sinf(rz);
+    return m;
+}
+
+void rotateMat(float x, float y, float z, const Rot &m, V3 &out)
+{
+    float x1 = x * m.cy + z * m.sy, z1 = -x * m.sy + z * m.cy;
+    float y1 = y * m.cx - z1 * m.sx, z2 = y * m.sx + z1 * m.cx;
+    out.x = x1 * m.cz - y1 * m.sz;
+    out.y = x1 * m.sz + y1 * m.cz;
+    out.z = z2;
+}
+
 bool Engine3D::project(float cx, float cy, float cz,
                        int &sx, int &sy, int &depth) const
 {
@@ -148,6 +166,45 @@ void Engine3D::renderPoint(const V3 &p,
     c.x = rp.x; c.y = rp.y; c.z = rp.z + camDist;
     int sx, sy, depth;
     if (!project(c.x, c.y, c.z, sx, sy, depth)) return;
+    float fog = 1.0f - (float)depth / 2800.0f;
+    if (fog < 0.1f) fog = 0.1f;
+    int ir = (int)(r * (intensity / 255.0f) * fog);
+    int ig = (int)(g * (intensity / 255.0f) * fog);
+    int ib = (int)(b * (intensity / 255.0f) * fog);
+    int rad = (depth < 600) ? radius + 1 : radius;
+    drawNeonDot(sx, sy, ir, ig, ib, rad);
+}
+
+void Engine3D::renderSegmentMat(const V3 &pa, const V3 &pb, const Rot &m,
+                                float camDist,
+                                int r, int g, int b, int intensity,
+                                int core, int glow)
+{
+    V3 ra, rb;
+    rotateMat(pa.x, pa.y, pa.z, m, ra);
+    rotateMat(pb.x, pb.y, pb.z, m, rb);
+    int axi, ayi, azd, bxi, byi, bzd;
+    if (!project(ra.x, ra.y, ra.z + camDist, axi, ayi, azd)) return;
+    if (!project(rb.x, rb.y, rb.z + camDist, bxi, byi, bzd)) return;
+    int avg = (azd + bzd) >> 1;
+    float fog = 1.0f - (float)avg / 2400.0f;
+    if (fog < 0.10f) fog = 0.10f;
+    int ir = (int)(r * (intensity / 255.0f) * fog);
+    int ig = (int)(g * (intensity / 255.0f) * fog);
+    int ib = (int)(b * (intensity / 255.0f) * fog);
+    int c2 = core, g2 = glow;
+    if (avg < 260) { c2 = core + 1; g2 = glow + 1; }
+    drawNeonLine(axi, ayi, bxi, byi, ir, ig, ib, c2, g2);
+}
+
+void Engine3D::renderPointMat(const V3 &p, const Rot &m, float camDist,
+                              int r, int g, int b, int intensity,
+                              int radius)
+{
+    V3 rp;
+    rotateMat(p.x, p.y, p.z, m, rp);
+    int sx, sy, depth;
+    if (!project(rp.x, rp.y, rp.z + camDist, sx, sy, depth)) return;
     float fog = 1.0f - (float)depth / 2800.0f;
     if (fog < 0.1f) fog = 0.1f;
     int ir = (int)(r * (intensity / 255.0f) * fog);
