@@ -38,9 +38,12 @@ public:
 
     // --- low-level 2D primitives (operate on the framebuffer) ---
     void setPixel(int x, int y, uint16_t c16);
-    // Additive blend of an RGB8 triple (clamped) — this is what makes neon
-    // lines "add light" on the black background instead of just overwriting.
-    void addPixel(int x, int y, int r, int g, int b);
+    // Additive blend of a pre-scaled RGB565 triple (clamped) — this is what
+    // makes neon lines "add light" on the black background. Callers pre-scale
+    // (r>>3, g>>2, b>>3) once per line so the hot per-pixel loop is shifts-free.
+    void addPixel(int x, int y, int r5, int g6, int b5);
+    // Hot core: colors already in RGB565 channel scale — no per-pixel shifts.
+    void addPixel565(int x, int y, int r5, int g6, int b5);
 
     // Draw a glowing line from (x0,y0) to (x1,y1). `core` is the line width
     // of the bright center; `glow` is the additive halo radius. Colors are

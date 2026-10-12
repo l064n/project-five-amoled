@@ -3,7 +3,7 @@
 /***********************config*************************/
 #define LCD_USB_QSPI_DREVER   1
 
-#define SPI_FREQUENCY         75000000
+#define SPI_FREQUENCY         80000000  // RM67162 QSPI max; matches official LilyGO driver
 #define TFT_SPI_MODE          SPI_MODE0
 #define TFT_SPI_HOST          SPI2_HOST
 

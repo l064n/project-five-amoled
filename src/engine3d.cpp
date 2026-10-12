@@ -11,16 +11,37 @@ void Engine3D::begin(int w, int h)
     W = w; H = h;
     focal_ = (W < H) ? W : H;           // ~min dimension as focal length
     if (!fb) {
-        fb = (uint16_t *)ps_malloc(sizeof(uint16_t) * W * H);
-        memset(fb, 0, sizeof(uint16_t) * W * H);
+        size_t n = (size_t)W * H * sizeof(uint16_t);
+        // Prefer internal DRAM: far faster than PSRAM for the per-frame
+        // clear + QSPI blit. Fall back to PSRAM if no contiguous block fits.
+        uint32_t caps = 0;
+        fb = (uint16_t *)heap_caps_malloc(n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (fb) { caps = MALLOC_CAP_INTERNAL; }
+        else {
+            fb = (uint16_t *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (fb) caps = MALLOC_CAP_SPIRAM;
+        }
+        memset(fb, 0, n);
+        Serial.printf("[fb] %u bytes in %s (free_int=%u free_psram=%u)\n",
+                      (unsigned)n,
+                      (caps == MALLOC_CAP_INTERNAL) ? "INTERNAL" : "PSRAM",
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     }
 }
 
 void Engine3D::clear(uint16_t color16)
 {
-    memset(fb, (color16 >> 8) & 0xFF, sizeof(uint16_t) * W * H); // high byte
-    memset(fb + 1, color16 & 0xFF, sizeof(uint16_t) * W * H);   // low byte
-    // (memset bytewise; uint16 little-endian: even=high, odd=low.)
+    const size_t n = (size_t)W * H * sizeof(uint16_t);
+    uint8_t hi = (color16 >> 8) & 0xFF, lo = color16 & 0xFF;
+    if (hi == lo) {
+        // Uniform byte (e.g. black 0x0000) — one pass fills the whole buffer.
+        // This is the common case and halves the old two-pass clear cost.
+        memset(fb, hi, n);
+    } else {
+        // Mixed bytes: store the full color word per pixel (rare path).
+        for (size_t i = 0, px = (size_t)W * H; i < px; i++) fb[i] = color16;
+    }
 }
 
 void Engine3D::setPixel(int x, int y, uint16_t c16)
@@ -31,13 +52,18 @@ void Engine3D::setPixel(int x, int y, uint16_t c16)
 
 void Engine3D::addPixel(int x, int y, int r, int g, int b)
 {
+    // Thin RGB8 entry: scale to 565 once, then use the shift-free hot core.
+    addPixel565(x, y, r >> 3, g >> 2, b >> 3);
+}
+
+void Engine3D::addPixel565(int x, int y, int r5, int g6, int b5)
+{
     if (x < 0 || y < 0 || x >= W || y >= H) return;
     uint16_t c = fb[y * W + x];
     int cr = (c >> 11) & 0x1F, cg = (c >> 5) & 0x3F, cb = c & 0x1F;
-    // Scale RGB8 -> 565 channel and add, clamp.
-    cr += r >> 3; if (cr > 31) cr = 31;
-    cg += g >> 2; if (cg > 63) cg = 63;
-    cb += b >> 3; if (cb > 31) cb = 31;
+    cr += r5; if (cr > 31) cr = 31;
+    cg += g6; if (cg > 63) cg = 63;
+    cb += b5; if (cb > 31) cb = 31;
     fb[y * W + x] = (uint16_t)((cr << 11) | (cg << 5) | cb);
 }
 
@@ -48,10 +74,11 @@ void Engine3D::bresenham(int x0, int y0, int x1, int y1, int r, int g, int b, in
     int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
     int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
     int err = dx + dy;
+    int r5 = r >> 3, g6 = g >> 2, b5 = b >> 3;  // scale once, not per pixel
     for (;;) {
         int half = width >> 1;
         for (int i = -half; i <= half; i++) {
-            addPixel(x0 + i, y0, r, g, b);
+            addPixel565(x0 + i, y0, r5, g6, b5);
         }
         if (x0 == x1 && y0 == y1) break;
         int e2 = 2 * err;
@@ -62,10 +89,11 @@ void Engine3D::bresenham(int x0, int y0, int x1, int y1, int r, int g, int b, in
 
 void Engine3D::drawNeonDot(int x, int y, int r, int g, int b, int radius)
 {
+    int r5 = r >> 3, g6 = g >> 2, b5 = b >> 3;
     for (int dy = -radius; dy <= radius; dy++)
         for (int dx = -radius; dx <= radius; dx++)
             if (dx * dx + dy * dy <= radius * radius)
-                addPixel(x + dx, y + dy, r, g, b);
+                addPixel565(x + dx, y + dy, r5, g6, b5);
 }
 
 void Engine3D::drawNeonLine(int x0, int y0, int x1, int y1,

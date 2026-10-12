@@ -299,10 +299,12 @@ static void renderTask(void *arg)
         // FPS once per second.
         if (t - g_fpsStart >= 1000) {
             g_fps = (int)(g_frames * 1000.0f / (float)(t - g_fpsStart));
-            if (g_frames > 0)
+            if (g_frames > 0) {
                 Serial.printf("[perf] fps=%d scene=%dms blit=%dms\n",
                               g_fps, g_sceneUs / g_frames / 1000,
                               g_blitUs / g_frames / 1000);
+                scene.flushPerf(g_frames);
+            }
             g_frames = 0;
             g_sceneUs = 0;
             g_blitUs = 0;
@@ -429,10 +431,12 @@ void loop()
 
             if (g_calibStep < 0) {
                 // Normal mode only: drag to rotate + feed momentum.
-                g_ry += dx * 0.020f;
-                g_rx += dy * 0.020f;
-                g_velRy = dx * 0.020f;
-                g_velRx = dy * 0.020f;
+                // Model follows the finger: drag right spins it right,
+                // drag down tips it forward (screen y grows downward).
+                g_ry -= dx * 0.020f;
+                g_rx -= dy * 0.020f;
+                g_velRy = -dx * 0.020f;
+                g_velRx = -dy * 0.020f;
                 if (g_rx > 1.3f)  g_rx = 1.3f;
                 if (g_rx < -0.4f) g_rx = -0.4f;
             }

@@ -1,4 +1,5 @@
 #include "scene.h"
+#include <Arduino.h>
 #include <math.h>
 #include <stdlib.h>
 
@@ -58,13 +59,17 @@ void Scene::begin()
     }
 }
 
+static int64_t g_sec[5] = {0,0,0,0,0}; // stars, grid, knot1, knot2, other
+
 void Scene::render(float rx, float ry, uint32_t t_ms)
 {
+    int64_t T0 = esp_timer_get_time();
     e_.clear(0x0000); // black — lets neon additive glow shine
 
     const Palette &P = pal();
 
     // ---------- 1) Parallax starfield (rotates with the camera, twinkles) ----------
+    int64_t T1 = esp_timer_get_time();
     Rot mStar = makeRot(rx, ry, 0.0f);
     for (int i = 0; i < STARS; i++) {
         // Twinkle: 0..255 via a phase-offset sine.
@@ -73,18 +78,19 @@ void Scene::render(float rx, float ry, uint32_t t_ms)
         e_.renderPointMat(stars_[i], mStar, 1600.0f,
                           P.star_r, P.star_g, P.star_b, dim, 1);
     }
+    int64_t T2 = esp_timer_get_time();
 
     // ---------- 2) Synthwave grid floor (axis-aligned, scrolling + wave) ----------
     const float GY = -150.0f;   // ground plane height (below center)
     const float XW = 900.0f;    // half-width of the grid
     const float Z0 = 60.0f;     // near
     const float Z1 = 3200.0f;   // far
-    float scroll = fmodf((float)t_ms * 0.18f, 120.0f);
     // Traveling brightness wave along depth (makes the floor "pulse").
     float waveT = 0.0009f * (float)t_ms;
 
-    // Depth lines (run from near to far at fixed x positions).
-    for (int k = -8; k <= 8; k++) {
+    // Depth lines (run from near to far at fixed x positions). 1px core-only:
+    // the additive halo was the scene's biggest cost and grid reads fine crisp.
+    for (int k = -6; k <= 6; k++) {
         float gx = (float)k * 120.0f;
         int x0, y0, d0, x1, y1, d1;
         if (!e_.project(gx, GY, Z0, x0, y0, d0)) continue;
@@ -92,11 +98,17 @@ void Scene::render(float rx, float ry, uint32_t t_ms)
         float fog = 1.0f - (float)(d0 + d1) / 2.0f / 3200.0f;
         if (fog < 0.08f) fog = 0.08f;
         int ir = (int)(P.grid_r * fog), ig = (int)(P.grid_g * fog), ib = (int)(P.grid_b * fog);
-        e_.drawNeonLine(x0, y0, x1, y1, ir, ig, ib, 1, 1);
+        e_.drawNeonLine(x0, y0, x1, y1, ir, ig, ib, 1, 0);
     }
 
-    // Horizontal lines (across width, scrolling toward viewer).
-    for (float z = Z0 + (120.0f - scroll); z < Z1; z += 120.0f) {
+    // Horizontal lines: geometric spacing (true perspective) scrolling toward
+    // the viewer. Fewer + shorter lines than a uniform grid at the same look.
+    float phase = fmodf((float)t_ms * 0.00035f, 1.0f);
+    float fr = 1.0f - phase;
+    for (int i = 0; i < 16; i++) {
+        float z = Z0 * powf(1.35f, (float)i + fr);
+        if (z >= Z1) break;
+        if (z < Z0) continue;
         int x0, y0, d0, x1, y1, d1;
         if (!e_.project(-XW, GY, z, x0, y0, d0)) continue;
         if (!e_.project( XW, GY, z, x1, y1, d1)) continue;
@@ -104,8 +116,9 @@ void Scene::render(float rx, float ry, uint32_t t_ms)
         if (fog < 0.08f) fog = 0.08f;
         float wv = 0.55f + 0.45f * sinf(waveT - (float)z * 0.004f);
         int ir = (int)(P.grid_r * fog * wv), ig = (int)(P.grid_g * fog * wv), ib = (int)(P.grid_b * fog * wv);
-        e_.drawNeonLine(x0, y0, x1, y1, ir, ig, ib, 1, 2);
+        e_.drawNeonLine(x0, y0, x1, y1, ir, ig, ib, 1, 0);
     }
+    int64_t T3 = esp_timer_get_time();
 
     // ---------- 3) Hero torus knot (hue-cycling + traveling pulse) ----------
     float spin = (float)(t_ms * 0.00045f);
@@ -124,13 +137,14 @@ void Scene::render(float rx, float ry, uint32_t t_ms)
         // Pulse: brighten + thicken near the comet head (wrap distance).
         float dd = (float)i - pulsePos;
         if (dd < 0) dd += (float)KNOT_N;
-        int core = 1, glow = 2, inten = 255;
+        int core = 1, glow = 1, inten = 255;   // thin halo; comet head gets a fat one
         if (dd < 24.0f) { inten = 255; core = 2; glow = 3; }
         else if (dd < 60.0f) { inten = 190; }
         else { inten = 150; }
         e_.renderSegmentMat(knot_[i], knot_[(i + 1) % KNOT_N], m1,
                             CAM_DIST, r, g, b, inten, core, glow);
     }
+    int64_t T4 = esp_timer_get_time();
 
     // ---------- 4) Secondary knot (thinner, counter-rotating, dimmer) ----------
     float spin2 = (float)(t_ms * -0.0006f);
@@ -146,4 +160,20 @@ void Scene::render(float rx, float ry, uint32_t t_ms)
         e_.renderSegmentMat(knot2_[i], knot2_[(i + 1) % KNOT2_N], m2,
                             CAM_DIST, r, g, b, 120, 1, 1);
     }
+    int64_t T5 = esp_timer_get_time();
+
+    g_sec[0] += (T2 - T1); // stars
+    g_sec[1] += (T3 - T2); // grid
+    g_sec[2] += (T4 - T3); // hero knot
+    g_sec[3] += (T5 - T4); // knot2
+    g_sec[4] += (T5 - T0) - (T2 - T1) - (T3 - T2) - (T4 - T3) - (T5 - T4); // clear+gaps
+}
+
+void Scene::flushPerf(uint32_t n) {
+    if (n == 0) return;
+    Serial.printf("[sec] stars=%d grid=%d knot1=%d knot2=%d clr=%d ms\n",
+                  (int)(g_sec[0] / n / 1000), (int)(g_sec[1] / n / 1000),
+                  (int)(g_sec[2] / n / 1000), (int)(g_sec[3] / n / 1000),
+                  (int)(g_sec[4] / n / 1000));
+    for (int i = 0; i < 5; i++) g_sec[i] = 0;
 }

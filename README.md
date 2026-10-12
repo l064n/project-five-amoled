@@ -45,11 +45,15 @@ vendored in [`lib/amoled`](lib/amoled).
 ## The neon 3D demo
 
 [`src/main.cpp`](src/main.cpp) brings up the AMOLED + touch and renders a
-self-contained 3D scene at ~60 Hz on a dedicated FreeRTOS task:
+self-contained 3D scene at 45+ fps on a dedicated FreeRTOS task:
 
-- **Hero object** — a rotating (p=2, q=3) **torus knot**.
-- **Floor** — a scrolling **synthwave perspective grid**.
-- **Background** — a **parallax starfield**.
+- **Hero object** — a rotating (p=2, q=3) **torus knot** with a hue-cycling
+  ribbon and a bright "comet" pulse traveling along its length.
+- **Second knot** — a thinner, counter-rotating (p=1, q=2) knot that interlaces
+  with the hero for depth and extra motion.
+- **Floor** — a scrolling **synthwave perspective grid** with a traveling
+  brightness wave (geometric perspective spacing).
+- **Background** — a **parallax starfield** that twinkles.
 - **Glow** — lines and points use **additive blending** on a pure-black
   background, which is exactly what makes an AMOLED "pop" (true blacks +
   light-adding neon).
@@ -85,9 +89,13 @@ namespace `touch`), so it only needs to be done once.
 [`src/engine3d.h`](src/engine3d.h) / [`src/engine3d.cpp`](src/engine3d.cpp) —
 a tiny, dependency-free renderer:
 
-- **Framebuffer** — one full 240×536 RGB565 frame in PSRAM (~254 KB).
-- **Math** — `V3` rotation about X/Y/Z, pinhole (perspective) projection with
-  a near-plane cull.
+- **Framebuffer** — one full 240×536 RGB565 frame (~257 KB) allocated in
+  **internal DRAM** (with a PSRAM fallback if no contiguous block fits).
+  Internal RAM is far faster than PSRAM for the per-frame clear + QSPI blit —
+  this single change took the demo from ~40 to ~60 fps.
+- **Math** — `V3` rotation about X/Y/Z (with a `makeRot`/`rotateMat` fast path
+  that precomputes the rotation once per object), pinhole (perspective)
+  projection with a near-plane cull.
 - **Primitives** — `drawNeonLine` / `drawNeonDot` using a thickened Bresenham
   with an additive halo + bright core, so overlaps literally add light.
 - **Camera-space rendering** — `renderSegment` / `renderPoint` rotate, move to
@@ -107,6 +115,18 @@ Send these characters over the USB-serial monitor to control the running demo:
 | `P` / `p` | Advance to the next color palette |
 | `C` / `c` | (Re)start the 4-corner touch calibration |
 | `R` / `r` | Debug: print the current **raw** touch reading (`[raw] x= y= z=`). Hold your finger on the screen and send `R` to see live values. |
+
+The demo also prints a performance line to serial every second while running:
+
+```
+[perf] fps=47 scene=13ms blit=6ms
+[sec]  stars=0 grid=9 knot1=1 knot2=0 clr=0 ms
+```
+
+`fps` is the measured frame rate; `scene`/`blit` split the frame time into
+software rendering vs the QSPI push to the panel; `[sec]` further splits the
+scene time across starfield / grid / hero knot / second knot / clear. Use this
+to tune geometry density against your target frame rate.
 
 ## Screenshots
 

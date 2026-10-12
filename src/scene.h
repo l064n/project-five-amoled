@@ -18,6 +18,7 @@ public:
 
     void begin();          // build static geometry
     void render(float rx, float ry, uint32_t t_ms);
+    void flushPerf(uint32_t n); // print + clear per-section timing (debug)
 
     // Camera distance (how far the hero object sits in front of the lens).
     static constexpr float CAM_DIST = 440.0f;
@@ -40,12 +41,12 @@ private:
     Engine3D &e_;
 
     // Hero torus knot (p=2, q=3) vertices (precomputed base frame).
-    static constexpr int KNOT_N  = 200;
+    static constexpr int KNOT_N  = 150;
     V3 knot_[KNOT_N];
     float knotHue_[KNOT_N];   // base hue per segment (for the traveling pulse)
 
     // Secondary knot (p=1, q=2), counter-rotating.
-    static constexpr int KNOT2_N = 140;
+    static constexpr int KNOT2_N = 100;
     V3 knot2_[KNOT2_N];
     float knot2Hue_[KNOT2_N];
 
