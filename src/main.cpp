@@ -42,6 +42,15 @@ static bool     g_wasDown = false;
 static uint32_t g_downMs = 0;
 static float    g_moved = 0.0f;
 
+// Physical button (PIN_BUTTON_1 / GPIO0, active-low w/ pull-up):
+//   short press  -> next scene mode
+//   long press   -> cycle animation speed (1x / 3x / paused)
+static bool     g_btnDown = false;
+static uint32_t g_btnDownMs = 0;
+static bool     g_btnLongFired = false;
+static uint32_t g_btnLastDebounce = 0;
+static constexpr uint32_t BTN_LONG_MS = 450;   // hold this long = "long press"
+
 // FPS tracking.
 static uint32_t g_frames = 0;
 static uint32_t g_fpsStart = 0;
@@ -213,6 +222,31 @@ static void drawPaletteDots()
     }
 }
 
+// Below the palette dots: one dot per scene mode, active is lit (white).
+static void drawModeDots()
+{
+    int n = Scene::NUM_MODES;
+    int startX = (engine.W - (n * 12)) / 2;
+    for (int i = 0; i < n; i++) {
+        int cx = startX + i * 12 + 5;
+        int cy = 20;
+        if (i == scene.mode)
+            engine.drawNeonDot(cx, cy, 255, 255, 255, 3);
+        else
+            engine.drawNeonDot(cx, cy, 70, 70, 70, 1);
+    }
+    // Speed pip: a small bar under the mode dots — width/position encodes speed.
+    // 1x = short, 3x = long, PAUSED = off (dim).
+    int sx = engine.W - 22;
+    int sy = 20;
+    if (scene.speedIndex == 0)
+        engine.drawNeonDot(sx, sy, 90, 200, 255, 2);
+    else if (scene.speedIndex == 1)
+        for (int i = 0; i < 4; i++) engine.drawNeonDot(sx - i * 5, sy, 90, 200, 255, 1);
+    else
+        engine.drawNeonDot(sx, sy, 60, 60, 60, 2);
+}
+
 // Calibration overlay: full-screen slate background + big bright target at the
 // corner to tap next + a progress bar. Deliberately high-contrast — on an
 // AMOLED a near-black "dim" band is invisible, so the whole screen is filled
@@ -273,6 +307,7 @@ static void renderAndPush(uint32_t t_ms)
     int64_t t0 = esp_timer_get_time();
     scene.render(g_rx, g_ry, t_ms);
     drawPaletteDots();
+    drawModeDots();
     drawInt(engine.W - 30, engine.H - 12, g_fps,
             scene.pal().line_r, scene.pal().line_g, scene.pal().line_b);
     drawCalibOverlay();
@@ -327,6 +362,10 @@ void setup()
 
     pinMode(PIN_LED, OUTPUT);
     digitalWrite(PIN_LED, HIGH);
+
+    // Physical button (active-low, pull-up): short press = next mode,
+    // long press = cycle speed. Safe even if unpopulated (pull-up holds high).
+    pinMode(PIN_BUTTON_1, INPUT_PULLUP);
 
     // Display.
     rm67162_init();
@@ -394,6 +433,49 @@ static void processSerialCommands()
                 Serial.printf("[raw] down x=%d y=%d z=%d\n", rx, ry, rz);
             else
                 Serial.println("[raw] no touch");
+        } else if (c == 'M' || c == 'm') {
+            // Next scene mode (same as the physical button short-press).
+            scene.nextMode();
+            Serial.printf("[mode] -> %s\n", scene.modeName());
+        } else if (c == 'S' || c == 's') {
+            // Cycle animation speed (same as the physical button long-press).
+            scene.nextSpeed();
+            Serial.printf("[speed] -> %s\n", scene.speedName());
+        }
+    }
+}
+
+// Poll the physical button: short press = next mode, long press = cycle speed.
+static void pollButton()
+{
+    // Active-low with pull-up: LOW = pressed.
+    bool raw = (digitalRead(PIN_BUTTON_1) == LOW);
+    // Debounce: ignore changes within 30 ms of the last accepted edge.
+    uint32_t now = millis();
+    if (raw) {
+        if (!g_btnDown) {
+            if (now - g_btnLastDebounce < 30) return;
+            g_btnLastDebounce = now;
+            g_btnDown = true;
+            g_btnDownMs = now;
+            g_btnLongFired = false;
+        } else if (!g_btnLongFired && now - g_btnDownMs >= BTN_LONG_MS) {
+            // Long press: fire once while held.
+            g_btnLongFired = true;
+            scene.nextSpeed();
+            Serial.printf("[btn] long press -> speed %s\n", scene.speedName());
+        }
+    } else {
+        if (g_btnDown) {
+            if (now - g_btnLastDebounce >= 30) {
+                g_btnLastDebounce = now;
+            }
+            g_btnDown = false;
+            if (!g_btnLongFired) {
+                // Released before the long-press threshold: a short press.
+                scene.nextMode();
+                Serial.printf("[btn] tap -> mode %s\n", scene.modeName());
+            }
         }
     }
 }
@@ -402,6 +484,7 @@ static void processSerialCommands()
 void loop()
 {
     processSerialCommands();
+    pollButton();
 
     // Single, non-blocking raw touch poll per iteration.
     int16_t rx = -1, ry = -1;
