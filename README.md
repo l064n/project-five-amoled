@@ -38,14 +38,21 @@ vendored in [`lib/amoled`](lib/amoled).
 │   └── library.json
 └── src/
     ├── engine3d.h / engine3d.cpp # software 3D engine
-    ├── scene.h / scene.cpp       # neon scene (torus knot, grid, stars)
-    └── main.cpp                  # app: touch input + render task + HUD
+    ├── scene.h / scene.cpp       # neon scene (knots, tesseract, mobius, helix, vortex)
+    ├── status_scene.cpp          # STATUS scene: 3D interactive WiFi + weather widgets
+    ├── status_data.h / .cpp      # shared status block (loop core -> render core)
+    ├── wifi_manager.h / .cpp     # WiFi STA + NVS creds + serial provisioning
+    ├── weather_client.h / .cpp   # geolocation (ipapi.co) + weather (open-meteo)
+    └── main.cpp                  # app: touch + button + serial + render task + HUD
 ```
 
 ## The neon 3D demo
 
 [`src/main.cpp`](src/main.cpp) brings up the AMOLED + touch and renders a
-self-contained 3D scene at 45+ fps on a dedicated FreeRTOS task:
+self-contained 3D scene at 45+ fps on a dedicated FreeRTOS task. There are
+**six toggleable scene modes** — KNOTS, TESSERACT, MOBIUS, HELIX, VORTEX, and
+the live **STATUS** page (see below) — cycled by the button or `M`. The hero
+**KNOTS** mode is:
 
 - **Hero object** — a rotating (p=2, q=3) **torus knot** with a hue-cycling
   ribbon and a bright "comet" pulse traveling along its length.
@@ -67,6 +74,59 @@ self-contained 3D scene at 45+ fps on a dedicated FreeRTOS task:
 
 A small FPS readout (bottom-right) and a palette indicator (top-center) are
 drawn as an overlay each frame.
+
+### The STATUS mode (live WiFi + local weather)
+
+There is a 6th scene mode — **STATUS** — a status page driven by 3D interactive
+graphics. Each status is its own 3D interactive visual, laid out as a
+constellation you can orbit by dragging (and pulse by tapping):
+
+| Widget | What it shows |
+| --- | --- |
+| **WiFi tower** | A 3D mast with concentric signal arcs that light up with RSSI; a rotating sweep beam while connecting, red blink when down |
+| **RSSI bars** | Five 3D bars at varying depth; hue shifts red→green with signal strength |
+| **IP display** | Four 3D octet cubes + a digit readout of the live IP (`?` when none) |
+| **Weather globe** | A rotating 3D wireframe sphere with the current weather icon *orbiting* it (sun / sun+cloud / cloud / fog / rain / snow / lightning, per WMO code) plus temp + city |
+| **Uptime ring** | A neon ring that fills over time + an FPS readout |
+
+Toggle to it with the **button** (short press) or **`M`** over serial. In STATUS
+mode a **tap** hit-tests the nearest widget and fires a pulse (falls back to the
+palette if it misses); in the other modes a tap still cycles the palette.
+
+#### Local weather (no API key)
+
+While connected to WiFi, a low-priority background task resolves the board's
+rough location from its own public IP and fetches current conditions — both
+free, no API key:
+
+1. `GET https://ipapi.co/json/` → latitude / longitude / city
+2. `GET https://api.open-meteo.com/v1/forecast?...&current_weather=true` →
+   temperature, WMO weather code, wind
+
+Results feed the weather globe and the `W` serial dump. It re-fetches every
+**30 min**; send **`L`** to force an immediate refresh.
+
+> **TLS note:** connections use `WiFiClientSecure` with certificate
+> verification. If a handshake ever fails (e.g. a missing/rotated CA on a
+> constrained build) the firmware logs a clear warning and retries **once**
+> insecure. This is a documented, intentional trade-off for a personal
+> dashboard — the payload is non-sensitive and nothing user-specific is sent.
+
+#### Provisioning WiFi (credentials stay off the repo)
+
+No SSID/password is committed. Credentials are stored in **NVS** (namespace
+`wifi`) and set at runtime over the USB-serial monitor:
+
+```
+N MySSID MyPassword      # store in NVS + connect (survives reboot)
+X                          # forget credentials + disconnect
+W                          # print WiFi state, IP, RSSI + location + weather
+L                          # force an immediate weather/location re-fetch
+```
+
+Once connected, send `W` to confirm the state, IP, RSSI, resolved location, and
+current weather. Auto-reconnect with capped backoff runs automatically if the
+link drops.
 
 ### Touch calibration
 
@@ -113,8 +173,14 @@ Send these characters over the USB-serial monitor to control the running demo:
 | --- | --- |
 | `F` / `f` | Freeze the frame and **stream the framebuffer over serial** (for screenshot capture) |
 | `P` / `p` | Advance to the next color palette |
+| `M` / `m` | Next scene mode (same as the button short-press) |
+| `S` / `s` | Cycle animation speed (same as the button long-press) |
 | `C` / `c` | (Re)start the 4-corner touch calibration |
 | `R` / `r` | Debug: print the current **raw** touch reading (`[raw] x= y= z=`). Hold your finger on the screen and send `R` to see live values. |
+| `W` / `w` | Print WiFi state, IP, RSSI + resolved location + current weather |
+| `N <ssid> <pass>` | Store WiFi credentials in NVS + connect (runtime provisioning) |
+| `X` / `x` | Forget stored WiFi credentials + disconnect |
+| `L` / `l` | Force an immediate location + weather re-fetch |
 
 The demo also prints a performance line to serial every second while running:
 
@@ -146,6 +212,17 @@ python scripts/capture_frame.py cyber        # after sending 'P' to switch palet
 | CYBER (cyan) | `captures/amoled_neon_cyber.png` |
 | LIME (green) | `captures/amoled_neon_lime.png` |
 | SOLAR (orange) | `captures/amoled_neon_solar.png` |
+
+### Scene modes
+
+| Mode | Capture |
+| --- | --- |
+| KNOTS | `captures/amoled_knots.png` |
+| TESSERACT | `captures/amoled_tesseract.png` |
+| MOBIUS | `captures/amoled_mobius.png` |
+| HELIX | `captures/amoled_helix.png` |
+| VORTEX | `captures/amoled_vortex.png` |
+| **STATUS** (WiFi offline) | `captures/amoled_status_off.png` |
 
 ## Key pins (see `lib/amoled/pins_config.h` + `touch_cst816.h`)
 
