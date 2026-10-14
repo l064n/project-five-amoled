@@ -91,21 +91,38 @@ float pulseEnv(uint32_t tMs, uint32_t stamp)
     return 1.0f - (float)(d - 90) / 610.0f;
 }
 
-// Project a world point under rotation m to screen (returns false if culled).
+// --- STATUS camera (world space): v = (world - C) * z, applied to EVERY
+// vertex and label so the 3D meshes + their text stay locked together and the
+// focused widget stays pinned to screen-center while you orbit. Set once per
+// frame in drawStatus() from the eased Scene camera.
+struct Cam { float z, cx, cy, cz; };
+Cam   g_cam    = {1.0f, 0.0f, 0.0f, 0.0f};
+float g_lscale = 1.0f;   // label / icon pixel scale (derived from zoom)
+
+inline V3 camX(const V3 &p) {
+    return { (p.x - g_cam.cx) * g_cam.z,
+             (p.y - g_cam.cy) * g_cam.z,
+             (p.z - g_cam.cz) * g_cam.z };
+}
+// Scale a length by the label scale (min 1 px).
+inline int scl(float v) { int s = (int)(v * g_lscale + 0.5f); return s < 1 ? 1 : s; }
+
+// Project a world point (through the camera) under rotation m to screen.
 bool proj(Engine3D &e, const V3 &p, const Rot &m, float camDist, int &sx, int &sy)
 {
+    V3 pc = camX(p);
     V3 r;
-    rotateMat(p.x, p.y, p.z, m, r);
+    rotateMat(pc.x, pc.y, pc.z, m, r);
     int d;
     return e.project(r.x, r.y, r.z + camDist, sx, sy, d);
 }
 
-// Draw a 3D segment between two world points (shared rotation). Culls if
+// Draw a 3D segment between two world points (through the camera). Culls if
 // either end is behind the camera.
 void seg3(Engine3D &e, const V3 &a, const V3 &b, const Rot &m, float camDist,
           int r, int g, int bl, int inten, int core, int glow)
 {
-    e.renderSegmentMat(a, b, m, camDist, r, g, bl, inten, core, glow);
+    e.renderSegmentMat(camX(a), camX(b), m, camDist, r, g, bl, inten, core, glow);
 }
 
 } // namespace
@@ -128,6 +145,7 @@ void Scene::drawStatus(float rx, float ry)
     city[sizeof(city) - 1] = 0;
     statusUnlock();
 
+    smoothCam(); // advance the eased zoom + focus-center camera
     const float t = spinT;
     // Dampen user orbit so the widgets stay readable, but still respond.
     Rot mG = makeRot(rx * 0.5f, ry * 0.5f, 0.0f);
@@ -139,6 +157,13 @@ void Scene::drawStatus(float rx, float ry)
     const V3 ipC     = {   0.0f,   40.0f,  40.0f };
     const V3 globeC  = {  -45.0f,  -45.0f,  60.0f };
     const V3 ringC   = {  55.0f,  -55.0f,  30.0f };
+    widgetAnchorW[0] = towerC; widgetAnchorW[1] = barsC; widgetAnchorW[2] = ipC;
+    widgetAnchorW[3] = globeC; widgetAnchorW[4] = ringC;
+
+    // Apply the eased camera (zoom + center) for this frame, and derive the
+    // label/icon pixel scale from the zoom so text grows with the widgets.
+    g_cam.z  = zCur;  g_cam.cx = cxCur;  g_cam.cy = cyCur;  g_cam.cz = czCur;
+    g_lscale = 0.55f + 0.45f * zCur;
 
     // Pulse envelopes per widget.
     float pTower = pulseEnv(millis(), pulseMs[0]);
@@ -192,7 +217,7 @@ void Scene::drawStatus(float rx, float ry)
         }
         // Label.
         int sx, sy;
-        if (proj(e_, towerC, mG, CD, sx, sy)) { tapX[0] = sx; tapY[0] = sy; drawStr(e_, sx - 16, sy + 30, "WIFI", r, g, b); }
+        if (proj(e_, towerC, mG, CD, sx, sy)) { tapX[0] = sx; tapY[0] = sy; drawStr(e_, sx - scl(16), sy + scl(30), "WIFI", r, g, b); }
         else { tapX[0] = e_.W / 2; tapY[0] = 0; }
     }
 
@@ -221,7 +246,7 @@ void Scene::drawStatus(float rx, float ry)
             seg3(e_, b1, t1, mG, CD, r, g, b, inten, 2, 0);      // right
         }
         int sx, sy;
-        if (proj(e_, barsC, mG, CD, sx, sy)) { tapX[1] = sx; tapY[1] = sy; drawStr(e_, sx - 12, sy + 26, "RSSI", 120, 200, 255); }
+        if (proj(e_, barsC, mG, CD, sx, sy)) { tapX[1] = sx; tapY[1] = sy; drawStr(e_, sx - scl(12), sy + scl(26), "RSSI", 120, 200, 255); }
         else { tapX[1] = e_.W / 2; tapY[1] = 0; }
     }
 
@@ -249,7 +274,7 @@ void Scene::drawStatus(float rx, float ry)
         }
         if (proj(e_, ipC, mG, CD, sx, sy)) {
             tapX[2] = sx; tapY[2] = sy;
-            drawStr(e_, sx - 24, sy + 16, ipbuf, 120, 235, 255);
+            drawStr(e_, sx - scl(24), sy + scl(16), ipbuf, 120, 235, 255);
         } else { tapX[2] = e_.W / 2; tapY[2] = 0; }
     }
 
@@ -264,7 +289,7 @@ void Scene::drawStatus(float rx, float ry)
             // Draw ring template; light `filled` cells, dim the rest.
             for (int row = 0; row < 5; row++)
                 for (int col = 0; col < 5; col++) {
-                    int px = sx - 8 + col * 4, py = sy - 10 + row * 4;
+                    int px = sx - scl(8) + col * scl(4), py = sy - scl(10) + row * scl(4);
                     if (px < 0 || py < 0 || px >= e_.W || py >= e_.H) continue;
                     bool on = kRing5[row] & (1 << (4 - col));
                     if (!on) continue;
@@ -276,11 +301,11 @@ void Scene::drawStatus(float rx, float ry)
                 }
             char buf[16];
             snprintf(buf, sizeof(buf), "UP %lu", (unsigned long)upt);
-            drawStr(e_, sx - 18, sy + 16, buf, 255, 180, 90);
+            drawStr(e_, sx - scl(18), sy + scl(16), buf, 255, 180, 90);
             char fb[8];
             snprintf(fb, sizeof(fb), "%u", (unsigned)fps);
-            drawStr(e_, sx + 2, sy + 16, "FPS " , 255, 180, 90);
-            drawStr(e_, sx + 22, sy + 16, fb, 255, 220, 120);
+            drawStr(e_, sx + scl(2), sy + scl(16), "FPS " , 255, 180, 90);
+            drawStr(e_, sx + scl(22), sy + scl(16), fb, 255, 220, 120);
         } else { tapX[4] = e_.W / 2; tapY[4] = 0; }
     }
 
@@ -295,14 +320,14 @@ void Scene::drawStatus(float rx, float ry)
             if (wvalid) {
                 char buf[16];
                 snprintf(buf, sizeof(buf), "%d.%dC", (int)(temp10 / 10), (int)((temp10 < 0 ? -temp10 : temp10) % 10));
-                drawStr(e_, sx - 16, sy + 34, buf, 120, 230, 255);
+                drawStr(e_, sx - scl(16), sy + scl(34), buf, 120, 230, 255);
                 char up[16];
                 for (int i = 0; i < 12 && city[i]; i++) up[i] = (char)toupper((unsigned char)city[i]);
                 up[12] = 0;
-                drawStr(e_, sx - 18, sy + 44, up, 90, 180, 220);
+                drawStr(e_, sx - scl(18), sy + scl(44), up, 90, 180, 220);
             } else {
-                drawStr(e_, sx - 22, sy + 34, "NO DATA", 120, 120, 140);
-                drawStr(e_, sx - 26, sy + 44, "WAIT WIFI", 90, 90, 110);
+                drawStr(e_, sx - scl(22), sy + scl(34), "NO DATA", 120, 120, 140);
+                drawStr(e_, sx - scl(26), sy + scl(44), "WAIT WIFI", 90, 90, 110);
             }
         }
     }
@@ -336,45 +361,46 @@ void drawRing3D(Engine3D &e, const V3 &c, float r, const V3 &u, const V3 &v,
     }
 }
 
-// --- billboard icon primitives (screen space) ---
+// --- billboard icon primitives (screen space). Sizes scale with the zoom
+// (g_lscale) so the weather icon grows with the 3D globe when focused. ---
 void iconSun(Engine3D &e, int cx, int cy, float t, float pulse, int inten)
 {
-    int R = 9 + (int)(3.0f * pulse);
+    float s = g_lscale;
+    int R = (int)(scl(9 + (int)(3.0f * pulse)));
     int ir = (int)(255 * inten), ig = (int)(210 * inten), ib = (int)(90 * inten);
     e.drawNeonDot(cx, cy, ir, ig, ib, R);
     e.addPixel(cx, cy, 60, 50, 20);
-    // 8 rotating spikes.
     float spin = t * 0.001f;
     for (int k = 0; k < 8; k++) {
         float a = spin + (float)k * M_PI / 4.0f;
-        int x0 = cx + (int)((R + 3) * cosf(a));
-        int y0 = cy + (int)((R + 3) * sinf(a));
-        int x1 = cx + (int)((R + 7) * cosf(a));
-        int y1 = cy + (int)((R + 7) * sinf(a));
-        e.drawNeonLine(x0, y0, x1, y1, ir, ig, ib, 1, 1);
+        int x0 = cx + (int)((R + scl(3)) * cosf(a));
+        int y0 = cy + (int)((R + scl(3)) * sinf(a));
+        int x1 = cx + (int)((R + scl(7)) * cosf(a));
+        int y1 = cy + (int)((R + scl(7)) * sinf(a));
+        e.drawNeonLine(x0, y0, x1, y1, ir, ig, ib, scl(1), 1);
     }
 }
 
 void iconCloud(Engine3D &e, int cx, int cy, float drift, float pulse, int inten)
 {
-    int r = 4 + (int)(2.0f * pulse);
+    int r = scl(4 + (int)(2.0f * pulse));
     int ir = (int)(200 * inten), ig = (int)(215 * inten), ib = (int)(235 * inten);
-    int base = cy + 2;
-    e.drawNeonDot(cx - r - 1 + (int)drift, base, ir, ig, ib, r);
-    e.drawNeonDot(cx + r + 1 + (int)drift, base, ir, ig, ib, r);
-    e.drawNeonDot(cx + (int)drift, base - r, ir, ig, ib, r + 1);
-    e.drawNeonDot(cx + (int)drift, base + 1, ir, ig, ib, r);
+    int d = (int)(drift * g_lscale);
+    int base = cy + scl(2);
+    e.drawNeonDot(cx - r - scl(1) + d, base, ir, ig, ib, r);
+    e.drawNeonDot(cx + r + scl(1) + d, base, ir, ig, ib, r);
+    e.drawNeonDot(cx + d, base - r, ir, ig, ib, r + 1);
+    e.drawNeonDot(cx + d, base + scl(1), ir, ig, ib, r);
 }
 
 void iconRain(Engine3D &e, int cx, int cy, float t, int inten)
 {
-    // Falling diagonal streaks under the cloud (cloud drawn by caller).
     int ir = (int)(90 * inten), ig = (int)(170 * inten), ib = (int)(255 * inten);
     for (int i = 0; i < 3; i++) {
-        int dx = cx - 5 + i * 5;
+        int dx = cx - scl(5) + i * scl(5);
         float ph = fmodf(t * 0.006f + i * 0.5f, 1.0f);
-        int y = cy + 6 + (int)(ph * 12.0f);
-        e.drawNeonLine(dx, y, dx - 2, y + 4, ir, ig, ib, 1, 0);
+        int y = cy + scl(6) + (int)(ph * scl(12));
+        e.drawNeonLine(dx, y, dx - scl(2), y + scl(4), ir, ig, ib, 1, 0);
     }
 }
 
@@ -382,14 +408,13 @@ void iconSnow(Engine3D &e, int cx, int cy, float t, int inten)
 {
     int ir = (int)(210 * inten), ig = (int)(235 * inten), ib = (int)(255 * inten);
     for (int i = 0; i < 3; i++) {
-        int dx = cx - 5 + i * 5;
+        int dx = cx - scl(5) + i * scl(5);
         float ph = fmodf(t * 0.004f + i * 0.5f, 1.0f);
-        int y = cy + 6 + (int)(ph * 12.0f);
-        // 6-arm mini star.
+        int y = cy + scl(6) + (int)(ph * scl(12));
         for (int a = 0; a < 6; a++) {
             float ang = (float)a * M_PI / 3.0f;
-            int x2 = dx + (int)(3 * cosf(ang));
-            int y2 = y + (int)(3 * sinf(ang));
+            int x2 = dx + (int)(scl(3) * cosf(ang));
+            int y2 = y + (int)(scl(3) * sinf(ang));
             e.drawNeonLine(dx, y, x2, y2, ir, ig, ib, 1, 0);
         }
     }
@@ -397,18 +422,16 @@ void iconSnow(Engine3D &e, int cx, int cy, float t, int inten)
 
 void iconLightning(Engine3D &e, int cx, int cy, float t, int inten)
 {
-    // Flash: bright for ~120 ms every ~1.2 s, with a double flicker.
     uint32_t cyc = (uint32_t)(t) % 1200;
     int flash = (cyc < 70 || (cyc > 240 && cyc < 300)) ? 255 : 40;
     flash = (int)(flash * inten);
     int ir = flash, ig = (int)(flash * 0.9f), ib = (int)(flash * 0.4f);
-    // Jagged bolt below the cloud.
-    int x0 = cx + 1, y0 = cy + 4;
+    int x0 = cx + scl(1), y0 = cy + scl(4);
     int pts[5][2] = {
-        { x0, y0 }, { x0 - 4, y0 + 6 }, { x0 - 1, y0 + 7 },
-        { x0 - 5, y0 + 13 }, { x0 - 2, y0 + 12 } };
+        { x0, y0 }, { x0 - scl(4), y0 + scl(6) }, { x0 - scl(1), y0 + scl(7) },
+        { x0 - scl(5), y0 + scl(13) }, { x0 - scl(2), y0 + scl(12) } };
     for (int i = 0; i < 4; i++)
-        e.drawNeonLine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], ir, ig, ib, 1, 1);
+        e.drawNeonLine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], ir, ig, ib, scl(1), 1);
 }
 
 // Map WMO code to an icon kind.

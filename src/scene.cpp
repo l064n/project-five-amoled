@@ -392,6 +392,44 @@ void Scene::flushPerf(uint32_t n) {
     for (int i = 0; i < 3; i++) g_sec[i] = 0;
 }
 
+void Scene::setZoom(float z) {
+    if (z < 1.0f) z = 1.0f;
+    if (z > 5.0f) z = 5.0f;
+    zT = z;
+    if (z <= 1.05f) { statusFocus = -1; cxT = cyT = czT = 0.0f; }
+}
+void Scene::focusWidget(int i, float z) {
+    if (i < 0 || i > 4) return;
+    statusFocus = i;
+    setZoom(z);
+    // Lock the camera center onto the widget's world anchor; smoothCam()
+    // eases there. It stays pinned to screen-center even while you orbit.
+    cxT = widgetAnchorW[i].x;
+    cyT = widgetAnchorW[i].y;
+    czT = widgetAnchorW[i].z;
+}
+void Scene::resetCam() {
+    statusFocus = -1; zT = 1.0f; cxT = cyT = czT = 0.0f;
+}
+void Scene::smoothCam() {
+    static uint32_t lastCamMs = 0;
+    uint32_t now = millis();
+    float dt = (lastCamMs ? (float)(now - lastCamMs) : 16.0f);
+    lastCamMs = now;
+    if (dt < 0.0f) dt = 16.0f;
+    if (dt > 100.0f) dt = 100.0f;
+    float a = 1.0f - expf(-dt / 110.0f); // ~95% settled in ~330 ms
+    zCur  += (zT  - zCur)  * a;
+    cxCur += (cxT - cxCur) * a;
+    cyCur += (cyT - cyCur) * a;
+    czCur += (czT - czCur) * a;
+    // Snap when settled to avoid endless sub-pixel drift.
+    if (fabsf(zCur - zT)   < 0.002f) zCur   = zT;
+    if (fabsf(cxCur - cxT) < 0.05f)  cxCur  = cxT;
+    if (fabsf(cyCur - cyT) < 0.05f)  cyCur  = cyT;
+    if (fabsf(czCur - czT) < 0.05f)  czCur  = czT;
+}
+
 const char *Scene::modeName() const {
     switch (mode) {
         case 0: return "KNOTS";

@@ -47,6 +47,8 @@ static bool     g_wasDown = false;
 static uint32_t g_downMs = 0;
 static float    g_moved = 0.0f;
 static int      g_tapX = -1, g_tapY = -1;   // release point (for STATUS hit-test)
+static uint32_t g_lastTapMs = 0;            // STATUS double-tap detection
+static int      g_lastTapX = -9999, g_lastTapY = -9999;
 
 // Physical button (PIN_BUTTON_1 / GPIO0, active-low w/ pull-up):
 //   short press  -> next scene mode
@@ -489,6 +491,29 @@ static void processSerialCommands()
         } else if (c == 'L' || c == 'l') {
             // Force an immediate location + weather re-fetch.
             g_weather.forceRefresh();
+        } else if (c == '+' || c == '=') {
+            // Zoom the STATUS camera in (toward the focused widget / center).
+            scene.setZoom(scene.zoom() * 1.4f);
+            Serial.printf("[cam] zoom %.2fx\n", scene.zoom());
+        } else if (c == '-') {
+            // Zoom the STATUS camera out (releases focus at 1x).
+            scene.setZoom(scene.zoom() / 1.4f);
+            Serial.printf("[cam] zoom %.2fx\n", scene.zoom());
+        } else if (c == '0') {
+            // Reset the STATUS camera to overview.
+            scene.resetCam();
+            Serial.println("[cam] reset (overview)");
+        } else if (c == 'G' || c == 'g') {
+            // Cycle focus: overview -> widget 0 -> 1 -> ... -> 4 -> overview.
+            // Serial equivalent of the double-tap-on-a-widget gesture.
+            int f = (scene.focusIdx() + 1) % 6;
+            if (f == 5) {
+                scene.resetCam();
+                Serial.println("[cam] focus -> overview");
+            } else {
+                scene.focusWidget(f, 2.6f);
+                Serial.printf("[cam] focus -> widget %d\n", f);
+            }
         }
     }
 }
@@ -633,8 +658,11 @@ void loop()
             // Normal mode: a quick, small move counts as a tap.
             if (dur < 300 && g_moved < 12.0f) {
                 if (scene.mode == 5) {
-                    // STATUS mode: hit-test the tap against the nearest widget
-                    // and fire its pulse. (No palette change here.)
+                    // STATUS mode: hit-test the tap against the nearest widget.
+                    //   single-tap a widget  -> pulse it
+                    //   double-tap a widget  -> zoom the camera in & lock to it
+                    //   double-tap empty     -> reset camera to overview
+                    //   single-tap empty     -> next palette (unchanged)
                     int best = -1, bd = 48 * 48; // 48 px capture radius
                     for (int i = 0; i < 5; i++) {
                         int ddx = g_tapX - scene.tapX[i];
@@ -642,12 +670,27 @@ void loop()
                         int d2 = ddx * ddx + ddy * ddy;
                         if (d2 < bd) { bd = d2; best = i; }
                     }
+                    // Double-tap = two taps close in time and space.
+                    uint32_t now = millis();
+                    int pdx = g_tapX - g_lastTapX, pdy = g_tapY - g_lastTapY;
+                    bool dbl = (now - g_lastTapMs < 350) && (pdx * pdx + pdy * pdy < 50 * 50);
+                    g_lastTapMs = now; g_lastTapX = g_tapX; g_lastTapY = g_tapY;
                     if (best >= 0) {
-                        scene.pulseWidget(best);
-                        Serial.printf("[touch] tap -> widget %d\n", best);
+                        if (dbl) {
+                            scene.focusWidget(best, 2.6f);
+                            Serial.printf("[touch] double-tap -> focus widget %d\n", best);
+                        } else {
+                            scene.pulseWidget(best);
+                            Serial.printf("[touch] tap -> widget %d\n", best);
+                        }
                     } else {
-                        scene.nextPalette();
-                        Serial.printf("[touch] tap -> palette %s\n", scene.pal().name);
+                        if (dbl) {
+                            scene.resetCam();
+                            Serial.println("[touch] double-tap -> overview");
+                        } else {
+                            scene.nextPalette();
+                            Serial.printf("[touch] tap -> palette %s\n", scene.pal().name);
+                        }
                     }
                 } else {
                     scene.nextPalette();

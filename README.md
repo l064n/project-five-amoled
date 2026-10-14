@@ -89,9 +89,24 @@ constellation you can orbit by dragging (and pulse by tapping):
 | **Weather globe** | A rotating 3D wireframe sphere with the current weather icon *orbiting* it (sun / sun+cloud / cloud / fog / rain / snow / lightning, per WMO code) plus temp + city |
 | **Uptime ring** | A neon ring that fills over time + an FPS readout |
 
-Toggle to it with the **button** (short press) or **`M`** over serial. In STATUS
-mode a **tap** hit-tests the nearest widget and fires a pulse (falls back to the
-palette if it misses); in the other modes a tap still cycles the palette.
+Toggle to it with the **button** (short press) or **`M`** over serial.
+
+#### Looking around (zoom + focus)
+
+The STATUS constellation is rendered through a small 3D camera you can move
+around to inspect each widget up close:
+
+- **Drag** — orbit the whole constellation (the widgets parallax in depth).
+- **Single-tap a widget** — fire its pulse.
+- **Double-tap a widget** — *zoom in and lock the camera onto it*: the widget
+  grows to fill the screen and stays pinned to center even as you drag-orbit
+  around it.
+- **Double-tap empty space** (or send `0`) — *reset* back to the overview.
+- **`+` / `-`** over serial — zoom in / out; **`G`** — cycle focus through the
+  widgets (overview → tower → bars → IP → globe → uptime → overview); **`0`**
+  — reset.
+
+In the other modes a tap still cycles the palette.
 
 #### Local weather (no API key)
 
@@ -115,18 +130,27 @@ Results feed the weather globe and the `W` serial dump. It re-fetches every
 #### Provisioning WiFi (credentials stay off the repo)
 
 No SSID/password is committed. Credentials are stored in **NVS** (namespace
-`wifi`) and set at runtime over the USB-serial monitor:
+`wifi`) and set at runtime over the USB-serial monitor.
+
+**To connect, type exactly this one line** (replace the values, keep the single
+space between SSID and password) and press Enter:
 
 ```
-N MySSID MyPassword      # store in NVS + connect (survives reboot)
-X                          # forget credentials + disconnect
-W                          # print WiFi state, IP, RSSI + location + weather
-L                          # force an immediate weather/location re-fetch
+N YourWiFiName YourWiFiPassword
 ```
 
-Once connected, send `W` to confirm the state, IP, RSSI, resolved location, and
-current weather. Auto-reconnect with capped backoff runs automatically if the
-link drops.
+Then wait a few seconds and type `W` to see the state, IP, RSSI, location, and
+weather. That's it — the credentials survive reboot.
+
+Other WiFi serial commands:
+
+```
+W   print WiFi state, IP, RSSI + location + weather
+X   forget credentials + disconnect
+L   force an immediate weather/location re-fetch
+```
+
+Auto-reconnect with capped backoff runs automatically if the link drops.
 
 ### Touch calibration
 
@@ -181,6 +205,10 @@ Send these characters over the USB-serial monitor to control the running demo:
 | `N <ssid> <pass>` | Store WiFi credentials in NVS + connect (runtime provisioning) |
 | `X` / `x` | Forget stored WiFi credentials + disconnect |
 | `L` / `l` | Force an immediate location + weather re-fetch |
+| `+` / `=` | **STATUS:** zoom the camera in |
+| `-` | **STATUS:** zoom the camera out (releases focus at 1×) |
+| `0` | **STATUS:** reset the camera to the overview |
+| `G` / `g` | **STATUS:** cycle camera focus through the widgets (overview → each widget → …) |
 
 The demo also prints a performance line to serial every second while running:
 
@@ -222,7 +250,9 @@ python scripts/capture_frame.py cyber        # after sending 'P' to switch palet
 | MOBIUS | `captures/amoled_mobius.png` |
 | HELIX | `captures/amoled_helix.png` |
 | VORTEX | `captures/amoled_vortex.png` |
-| **STATUS** (WiFi offline) | `captures/amoled_status_off.png` |
+| **STATUS** (overview) | `captures/amoled_status_overview.png` |
+| **STATUS** — focused + zoomed (WiFi tower) | `captures/amoled_status_focus_tower.png` |
+| **STATUS** — focused + zoomed (weather globe) | `captures/amoled_status_focus_globe.png` |
 
 ## Key pins (see `lib/amoled/pins_config.h` + `touch_cst816.h`)
 

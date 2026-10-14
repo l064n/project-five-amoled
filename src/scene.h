@@ -36,7 +36,10 @@ public:
     static constexpr int NUM_MODES = 6;
     int mode = 0;
     const char *modeName() const;
-    void nextMode() { mode = (mode + 1) % NUM_MODES; }
+    void nextMode() {
+        mode = (mode + 1) % NUM_MODES;
+        if (mode != 5) resetCam(); // leaving STATUS: start fresh next time
+    }
 
     // ---- animation speed (long-press): 0 = 1x, 1 = 3x, 2 = paused ----
     static constexpr int NUM_SPEEDS = 3;
@@ -65,6 +68,30 @@ public:
     // main.cpp hit-tests a tap against the nearest of these.
     int tapX[5] = {0,0,0,0,0};
     int tapY[5] = {0,0,0,0,0};
+
+    // ---- STATUS-mode camera: smooth zoom + focus-on-widget (world space) ----
+    // The whole STATUS constellation is rendered through a camera transform
+    //   v = (world - camC) * z
+    // applied to every vertex AND label before orbit-rotation + projection,
+    // so meshes and their labels always stay locked together.
+    // zCur/camC are eased toward zT/camCT by smoothCam() each frame.
+    // When statusFocus >= 0 the camera center targets that widget's world
+    // anchor, pinning it to screen-center (stays centered even while you
+    // drag-orbit). In overview (statusFocus < 0) the center eases back to 0.
+    float  zCur = 1.0f;                         // eased zoom
+    float  cxCur = 0.0f, cyCur = 0.0f, czCur = 0.0f; // eased center (world)
+    float  zT = 1.0f;                           // zoom target
+    float  cxT = 0.0f, cyT = 0.0f, czT = 0.0f;  // center target (world)
+    int    statusFocus = -1;                    // widget index locked, or -1
+    int    focusIdx() const { return statusFocus; }
+    float  zoom() const { return zCur; }
+    // World-space anchors of the 5 STATUS widgets (fixed layout), set by
+    // drawStatus each frame and read by focusWidget/main for hit-testing.
+    V3     widgetAnchorW[5];
+    void   setZoom(float z);            // clamp; zooming out also releases focus
+    void   focusWidget(int i, float z); // lock the camera to widget i at zoom z
+    void   resetCam();                   // overview: zoom 1, no focus, center 0
+    void   smoothCam();                  // ease the camera toward targets/frame
 
     // Per-pixel hue offset applied on top of the palette base hue (degrees).
     float hueShift(uint32_t t_ms) const { return fmodf((float)t_ms * 0.02f, 360.0f); }
