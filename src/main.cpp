@@ -511,7 +511,7 @@ static void processSerialCommands()
                 scene.resetCam();
                 Serial.println("[cam] focus -> overview");
             } else {
-                scene.focusWidget(f, 2.6f);
+                scene.focusWidget(f, Scene::ZOOM_FOCUS);
                 Serial.printf("[cam] focus -> widget %d\n", f);
             }
         }
@@ -655,8 +655,9 @@ void loop()
                 }
             }
         } else {
-            // Normal mode: a quick, small move counts as a tap.
-            if (dur < 300 && g_moved < 12.0f) {
+            // Normal mode: a quick, small move counts as a tap. (Generous
+            // thresholds so a normal finger tap always registers.)
+            if (dur < 420 && g_moved < 26.0f) {
                 if (scene.mode == 5) {
                     // STATUS mode: hit-test the tap against the nearest widget.
                     //   single-tap a widget  -> pulse it
@@ -673,11 +674,11 @@ void loop()
                     // Double-tap = two taps close in time and space.
                     uint32_t now = millis();
                     int pdx = g_tapX - g_lastTapX, pdy = g_tapY - g_lastTapY;
-                    bool dbl = (now - g_lastTapMs < 350) && (pdx * pdx + pdy * pdy < 50 * 50);
+                    bool dbl = (now - g_lastTapMs < 450) && (pdx * pdx + pdy * pdy < 70 * 70);
                     g_lastTapMs = now; g_lastTapX = g_tapX; g_lastTapY = g_tapY;
                     if (best >= 0) {
                         if (dbl) {
-                            scene.focusWidget(best, 2.6f);
+                            scene.focusWidget(best, Scene::ZOOM_FOCUS);
                             Serial.printf("[touch] double-tap -> focus widget %d\n", best);
                         } else {
                             scene.pulseWidget(best);

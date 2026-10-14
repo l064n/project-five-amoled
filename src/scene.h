@@ -78,9 +78,12 @@ public:
     // When statusFocus >= 0 the camera center targets that widget's world
     // anchor, pinning it to screen-center (stays centered even while you
     // drag-orbit). In overview (statusFocus < 0) the center eases back to 0.
-    float  zCur = 1.0f;                         // eased zoom
+    // Camera zoom levels for STATUS.
+    static constexpr float ZOOM_OVERVIEW = 1.5f; // default view (nicely close)
+    static constexpr float ZOOM_FOCUS    = 3.0f; // double-tap / G lock-on zoom
+    float  zCur = 1.0f;                         // eased zoom (ramps in on entry)
     float  cxCur = 0.0f, cyCur = 0.0f, czCur = 0.0f; // eased center (world)
-    float  zT = 1.0f;                           // zoom target
+    float  zT = ZOOM_OVERVIEW;                  // zoom target
     float  cxT = 0.0f, cyT = 0.0f, czT = 0.0f;  // center target (world)
     int    statusFocus = -1;                    // widget index locked, or -1
     int    focusIdx() const { return statusFocus; }

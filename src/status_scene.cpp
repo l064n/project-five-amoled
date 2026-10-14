@@ -81,15 +81,19 @@ void drawStr(Engine3D &e, int x, int y, const char *s, int r, int g, int b)
     }
 }
 
-// 0..1 pulse envelope from a timestamp (ms) — rises fast, decays over ~700ms.
+// 0..1 pulse envelope from a timestamp (ms) — fast attack, ~1.1s decay.
 float pulseEnv(uint32_t tMs, uint32_t stamp)
 {
     if (!stamp) return 0.0f;
     uint32_t d = tMs - stamp;
-    if (d > 700) return 0.0f;
-    if (d < 90) return (float)d / 90.0f;
-    return 1.0f - (float)(d - 90) / 610.0f;
+    if (d > 1100) return 0.0f;
+    if (d < 70)  return (float)d / 70.0f;
+    return 1.0f - (float)(d - 70) / 1030.0f;
 }
+// Tap feedback: a punchy scale bump (up to +80%) and a brightness flash
+// (up to +100) driven by the same envelope, so a tap is clearly visible.
+float pulseScale(float env) { return 1.0f + 0.8f * env; }
+int   pulseBoost(float env) { return (int)(100.0f * env); }
 
 // --- STATUS camera (world space): v = (world - C) * z, applied to EVERY
 // vertex and label so the 3D meshes + their text stay locked together and the
@@ -187,17 +191,20 @@ void Scene::drawStatus(float rx, float ry)
         int r = up ? 80 : 255, g = up ? 230 : 70, b = up ? 255 : 70;
         // Off/failed: blink.
         if (!up && ((millis() / 400) & 1)) { r = 120; g = 30; b = 30; }
-        float s = 1.0f + 0.25f * pTower;
+        // Tap pulse: punchy scale + brightness flash.
+        float s = pulseScale(pTower);
+        int boost = pulseBoost(pTower);
+        if (r + boost > 255) r = 255; if (g + boost > 255) g = 255; if (b + boost > 255) b = 255;
         V3 base = towerC, tip = towerC; tip.y += 60.0f * s;
         // Mast.
         V3 mb = { towerC.x, towerC.y, towerC.z }, mt = { towerC.x, towerC.y + 60.0f * s, towerC.z };
-        seg3(e_, mb, mt, mG, CD, r, g, b, 200, 2, 2);
+        seg3(e_, mb, mt, mG, CD, r, g, b, 200 + boost, 2, 2);
         // Arcs: three concentric, lit by level.
         for (int a = 0; a < 3; a++) {
             float rad = 14.0f + a * 13.0f;
             float lit = (lvl * 3.0f > (float)a) ? 1.0f : 0.18f;
             int ir = (int)(r * lit), ig = (int)(g * lit), ib = (int)(b * lit);
-            int inten = (int)(120 + 135.0f * lit);
+            int inten = (int)(120 + 135.0f * lit) + boost;
             int N = 14;
             V3 pa, pb;
             for (int i = 0; i < N; i++) {
@@ -225,21 +232,24 @@ void Scene::drawStatus(float rx, float ry)
     {
         int lit = (int)(lvl * 5.0f + 0.5f);
         int N = 5, bw = 8, gap = 5;
+        float bsScale = pulseScale(pBars);
+        int bboost = pulseBoost(pBars);
         for (int i = 0; i < N; i++) {
-            float hgt = (14.0f + i * 12.0f) * (1.0f + 0.2f * pBars);
+            float hgt = (14.0f + i * 12.0f) * bsScale;
             bool on = (i < lit);
-            float hue = fmodf(200.0f - 160.0f * (float)i / (float)N + 0.0f, 360.0f);
             // Strength hue: red->green as i rises.
             int r = on ? (int)(120 - 90.0f * (float)i / (float)N) : 40;
             int g = on ? (int)(80 + 150.0f * (float)i / (float)N) : 40;
             int b = on ? 120 : 60;
-            (void)hue;
+            r += bboost; if (r > 255) r = 255;
+            g += bboost; if (g > 255) g = 255;
+            b += bboost; if (b > 255) b = 255;
             float x = barsC.x - (float)(N - 1) * (bw + gap) * 0.5f + (float)i * (bw + gap);
             V3 b0 = { x, barsC.y, barsC.z };
             V3 b1 = { x + bw, barsC.y, barsC.z };
             V3 t0 = { x, barsC.y + hgt, barsC.z };
             V3 t1 = { x + bw, barsC.y + hgt, barsC.z };
-            int inten = on ? 220 : 60;
+            int inten = (on ? 220 : 60) + bboost;
             seg3(e_, b0, b1, mG, CD, r, g, b, inten, 2, 0);      // bottom
             seg3(e_, t0, t1, mG, CD, r, g, b, inten, 2, 0);      // top
             seg3(e_, b0, t0, mG, CD, r, g, b, inten, 2, 0);      // left
@@ -256,11 +266,12 @@ void Scene::drawStatus(float rx, float ry)
         statusIpToStr(ip, ipbuf);
         int sx, sy;
         // 4 small cubes (one per octet) in a row, + digit label below.
+        int ipb = pulseBoost(pIp);
         for (int o = 0; o < 4; o++) {
             float x = ipC.x - 33.0f + (float)o * 22.0f;
             float y = ipC.y;
             float z = ipC.z;
-            float s = 9.0f * (1.0f + 0.3f * pIp);
+            float s = 9.0f * pulseScale(pIp);
             V3 v[8] = {
                 { x - s, y - s, z - s }, { x + s, y - s, z - s },
                 { x + s, y + s, z - s }, { x - s, y + s, z - s },
@@ -269,7 +280,7 @@ void Scene::drawStatus(float rx, float ry)
             int e12[6][2] = { {0,1},{1,2},{2,3},{3,0} };
             int e45[4][2] = { {4,5},{5,6},{6,7},{7,4} };
             int c48[4][2] = { {0,4},{1,5},{2,6},{3,7} };
-            int inten = 200;
+            int inten = 200 + ipb;
             for (int i = 0; i < 4; i++) { seg3(e_, v[e12[i][0]], v[e12[i][1]], mG, CD, 90, 230, 255, inten, 1, 1); seg3(e_, v[e45[i][0]], v[e45[i][1]], mG, CD, 90, 230, 255, inten, 1, 1); seg3(e_, v[c48[i][0]], v[c48[i][1]], mG, CD, 90, 230, 255, inten, 1, 1); }
         }
         if (proj(e_, ipC, mG, CD, sx, sy)) {
@@ -283,6 +294,8 @@ void Scene::drawStatus(float rx, float ry)
         // A 5x5 neon ring filled by uptime fraction (mod 3600 s), + FPS.
         float frac = (float)(upt % 3600) / 3600.0f;
         int filled = (int)(frac * 12.0f); // ~12 ring pixels
+        int rb = pulseBoost(pRing);
+        int rad = 1 + (int)(2.0f * pRing);
         int sx, sy;
         if (proj(e_, ringC, mG, CD, sx, sy)) {
             tapX[4] = sx; tapY[4] = sy;
@@ -295,8 +308,10 @@ void Scene::drawStatus(float rx, float ry)
                     if (!on) continue;
                     int idx = row * 5 + col;
                     int inten = (idx < filled) ? 230 : 45;
-                    int r = 255, g = (int)(120 + 80.0f * (float)filled / 12.0f), b = 60;
-                    e_.drawNeonDot(px, py, r, g, b, 1);
+                    int r = 255, g = (int)(120 + 80.0f * (float)filled / 12.0f) + rb, b = 60 + rb;
+                    if (g > 255) g = 255; if (b > 255) b = 255;
+                    (void)inten;
+                    e_.drawNeonDot(px, py, r, g, b, rad);
                     e_.addPixel(px, py, (r >> 2), (g >> 2), (b >> 2));
                 }
             char buf[16];

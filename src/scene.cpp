@@ -393,10 +393,10 @@ void Scene::flushPerf(uint32_t n) {
 }
 
 void Scene::setZoom(float z) {
-    if (z < 1.0f) z = 1.0f;
+    if (z < ZOOM_OVERVIEW) z = ZOOM_OVERVIEW;
     if (z > 5.0f) z = 5.0f;
     zT = z;
-    if (z <= 1.05f) { statusFocus = -1; cxT = cyT = czT = 0.0f; }
+    if (z <= ZOOM_OVERVIEW + 0.05f) { statusFocus = -1; cxT = cyT = czT = 0.0f; }
 }
 void Scene::focusWidget(int i, float z) {
     if (i < 0 || i > 4) return;
@@ -409,7 +409,7 @@ void Scene::focusWidget(int i, float z) {
     czT = widgetAnchorW[i].z;
 }
 void Scene::resetCam() {
-    statusFocus = -1; zT = 1.0f; cxT = cyT = czT = 0.0f;
+    statusFocus = -1; zT = ZOOM_OVERVIEW; cxT = cyT = czT = 0.0f;
 }
 void Scene::smoothCam() {
     static uint32_t lastCamMs = 0;
