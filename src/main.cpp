@@ -23,11 +23,16 @@
 #include "touch_cst816.h"     // capacitive touch
 #include "engine3d.h"         // software 3D engine
 #include "scene.h"            // neon scene
+#include "status_data.h"      // shared status block (WiFi + weather)
+#include "wifi_manager.h"     // WiFi STA + NVS creds + provisioning
+#include "weather_client.h"   // geolocation + current weather (own task)
 
 // -------------------------------------------------------------------------
 static Engine3D engine;
 static Scene    scene(engine);
 static CST816   touch;
+static WiFiManager   g_wifi;
+static WeatherClient g_weather;
 
 // Camera angles (radians) controlled by touch.
 static float g_rx = 0.20f;
@@ -339,6 +344,7 @@ static void renderTask(void *arg)
                               g_fps, g_sceneUs / g_frames / 1000,
                               g_blitUs / g_frames / 1000);
                 scene.flushPerf(g_frames);
+                g_status.fps = (uint32_t)g_fps;   // publish for the STATUS scene
             }
             g_frames = 0;
             g_sceneUs = 0;
@@ -388,6 +394,11 @@ void setup()
     engine.begin(TFT_WIDTH, TFT_HEIGHT);
     scene.begin();
 
+    // WiFi + weather (STATUS scene data sources).
+    statusBegin();
+    g_wifi.begin();
+    g_weather.begin();
+
     g_fpsStart = millis();
     xTaskCreatePinnedToCore(renderTask, "render", 4096, nullptr, 2, nullptr, 1);
 }
@@ -410,6 +421,10 @@ static void sendFrameOverSerial()
     }
     g_freeze = false;
 }
+
+// Collect the rest of the serial line (after a command char) up to a newline
+// or `timeout_ms`. Used by the 'N' provisioning command.
+static bool readLine(String &out, uint32_t timeout_ms);
 
 static void processSerialCommands()
 {
@@ -441,8 +456,58 @@ static void processSerialCommands()
             // Cycle animation speed (same as the physical button long-press).
             scene.nextSpeed();
             Serial.printf("[speed] -> %s\n", scene.speedName());
+        } else if (c == 'W' || c == 'w') {
+            // Dump WiFi + weather status.
+            String a, b;
+            g_wifi.describe(a);
+            g_weather.describe(b);
+            Serial.println("[status] wifi: " + a);
+            Serial.println("[status] " + b);
+        } else if (c == 'N' || c == 'n') {
+            // Provision: "N <ssid> <pass>" (rest of line).
+            String line;
+            if (readLine(line, 2500)) {
+                int sp = line.indexOf(' ');
+                if (sp > 0) {
+                    String ssid = line.substring(0, sp);
+                    String pass = line.substring(sp + 1);
+                    while (pass.startsWith(" ")) pass.remove(0, 1);
+                    if (g_wifi.setCredentials(ssid.c_str(), pass.c_str()))
+                        Serial.println("[serial] wifi: credentials stored, connecting");
+                    else
+                        Serial.println("[serial] wifi: empty ssid — not stored");
+                } else {
+                    Serial.println("[serial] usage: N <ssid> <pass>");
+                }
+            } else {
+                Serial.println("[serial] usage: N <ssid> <pass>");
+            }
+        } else if (c == 'X' || c == 'x') {
+            // Forget stored credentials + disconnect.
+            g_wifi.forget();
+        } else if (c == 'L' || c == 'l') {
+            // Force an immediate location + weather re-fetch.
+            g_weather.forceRefresh();
         }
     }
+}
+
+// Collect the rest of the serial line (after a command char) up to a newline
+// or `timeout_ms`. Used by the 'N' provisioning command.
+static bool readLine(String &out, uint32_t timeout_ms = 2500)
+{
+    out = "";
+    uint32_t t0 = millis();
+    while (millis() - t0 < timeout_ms) {
+        if (Serial.available()) {
+            char c = (char)Serial.read();
+            if (c == '\n') break;
+            if (c != '\r' && out.length() < 96) out += c;
+        }
+        vTaskDelay(1);
+    }
+    out.trim();
+    return out.length() > 0;
 }
 
 // Poll the physical button: short press = next mode, long press = cycle speed.
@@ -485,6 +550,16 @@ void loop()
 {
     processSerialCommands();
     pollButton();
+
+    // WiFi state machine (cheap; auto-reconnect + stats mirror).
+    g_wifi.update();
+    // 1 Hz system stats for the STATUS scene.
+    static uint32_t g_lastStatMs = 0;
+    uint32_t nowMs = millis();
+    if (nowMs - g_lastStatMs >= 1000) {
+        g_status.uptime_s = nowMs / 1000;
+        g_lastStatMs = nowMs;
+    }
 
     // Single, non-blocking raw touch poll per iteration.
     int16_t rx = -1, ry = -1;
