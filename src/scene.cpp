@@ -1,7 +1,9 @@
 #include "scene.h"
+#include "status_data.h"
 #include <Arduino.h>
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -147,6 +149,7 @@ void Scene::render(float rx, float ry, uint32_t t_ms)
         case 2: drawMobius(rx, ry);    break;
         case 3: drawHelix(rx, ry);     break;
         case 4: drawVortex(rx, ry);    break;
+        case 5: drawStatus(rx, ry);    break;
         default: drawKnots(rx, ry);    break;
     }
     int64_t T5 = esp_timer_get_time();
@@ -396,6 +399,7 @@ const char *Scene::modeName() const {
         case 2: return "MOBIUS";
         case 3: return "HELIX";
         case 4: return "VORTEX";
+        case 5: return "STATUS";
         default: return "?";
     }
 }

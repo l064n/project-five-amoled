@@ -46,6 +46,7 @@ static int16_t  g_lastRawX = -1, g_lastRawY = -1;
 static bool     g_wasDown = false;
 static uint32_t g_downMs = 0;
 static float    g_moved = 0.0f;
+static int      g_tapX = -1, g_tapY = -1;   // release point (for STATUS hit-test)
 
 // Physical button (PIN_BUTTON_1 / GPIO0, active-low w/ pull-up):
 //   short press  -> next scene mode
@@ -580,6 +581,8 @@ void loop()
             g_moved = 0.0f;
             g_lastX = x;
             g_lastY = y;
+            g_tapX = x;
+            g_tapY = y;
         } else {
             int dx = x - g_lastX;
             int dy = y - g_lastY;
@@ -629,8 +632,27 @@ void loop()
         } else {
             // Normal mode: a quick, small move counts as a tap.
             if (dur < 300 && g_moved < 12.0f) {
-                scene.nextPalette();
-                Serial.printf("[touch] tap -> palette %s\n", scene.pal().name);
+                if (scene.mode == 5) {
+                    // STATUS mode: hit-test the tap against the nearest widget
+                    // and fire its pulse. (No palette change here.)
+                    int best = -1, bd = 48 * 48; // 48 px capture radius
+                    for (int i = 0; i < 5; i++) {
+                        int ddx = g_tapX - scene.tapX[i];
+                        int ddy = g_tapY - scene.tapY[i];
+                        int d2 = ddx * ddx + ddy * ddy;
+                        if (d2 < bd) { bd = d2; best = i; }
+                    }
+                    if (best >= 0) {
+                        scene.pulseWidget(best);
+                        Serial.printf("[touch] tap -> widget %d\n", best);
+                    } else {
+                        scene.nextPalette();
+                        Serial.printf("[touch] tap -> palette %s\n", scene.pal().name);
+                    }
+                } else {
+                    scene.nextPalette();
+                    Serial.printf("[touch] tap -> palette %s\n", scene.pal().name);
+                }
             }
         }
         g_wasDown = false;

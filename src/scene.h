@@ -10,6 +10,10 @@
 //   2 MOBIUS     — a rotating wireframe Möbius strip (hue gradient + pulse).
 //   3 HELIX      — a double helix with cross rungs, counter-rotating strands.
 //   4 VORTEX     — a swirling particle galaxy (spiral disc, hue by radius).
+//   5 STATUS     — live WiFi + local-weather status page: a constellation of
+//                  interactive 3D widgets (WiFi tower, RSSI bars, IP octets,
+//                  weather globe, uptime ring) driven by the shared
+//                  StatusData (see status_data.h).
 //
 // All modes share: the twinkling parallax starfield, the active palette, and
 // drag-to-rotate (rx/ry). A scaled animation clock (spinT) drives every phase,
@@ -29,7 +33,7 @@ public:
     static constexpr float CAM_DIST = 440.0f;
 
     // ---- scenes ----
-    static constexpr int NUM_MODES = 5;
+    static constexpr int NUM_MODES = 6;
     int mode = 0;
     const char *modeName() const;
     void nextMode() { mode = (mode + 1) % NUM_MODES; }
@@ -52,6 +56,15 @@ public:
     int paletteIndex = 0;
     const Palette &pal() const { return kPalettes[paletteIndex]; }
     void nextPalette() { paletteIndex = (paletteIndex + 1) % NUM_PALETTES; }
+
+    // STATUS-mode tap-to-pulse: set by main.cpp when a tap lands in this mode.
+    // pulse[0]=tower pulse[1]=bars pulse[2]=ip pulse[3]=globe pulse[4]=uptime
+    volatile uint32_t pulseMs[5] = {0,0,0,0,0};
+    void pulseWidget(int i) { if (i >= 0 && i < 5) pulseMs[i] = millis(); }
+    // Projected 2D anchors of the 5 widgets, updated each frame by drawStatus.
+    // main.cpp hit-tests a tap against the nearest of these.
+    int tapX[5] = {0,0,0,0,0};
+    int tapY[5] = {0,0,0,0,0};
 
     // Per-pixel hue offset applied on top of the palette base hue (degrees).
     float hueShift(uint32_t t_ms) const { return fmodf((float)t_ms * 0.02f, 360.0f); }
@@ -101,4 +114,10 @@ private:
     void drawMobius(float rx, float ry);
     void drawHelix(float rx, float ry);
     void drawVortex(float rx, float ry);
+    void drawStatus(float rx, float ry);
+    // Weather widget (called by drawStatus): rotating wireframe globe with a
+    // billboard weather icon orbiting it, per WMO code.
+    void drawWeatherGlobe(const V3 &c, const Rot &m, float camDist, float t,
+                          uint32_t wvalid, uint32_t wcode, int32_t temp10,
+                          const char *city, float pulse);
 };
