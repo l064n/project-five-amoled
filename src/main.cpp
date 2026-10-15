@@ -45,8 +45,8 @@ static int16_t  g_lastX = -1, g_lastY = -1;
 static int16_t  g_lastRawX = -1, g_lastRawY = -1;
 static bool     g_wasDown = false;
 static uint32_t g_downMs = 0;
-static float    g_moved = 0.0f;
-static int      g_tapX = -1, g_tapY = -1;   // release point (for STATUS hit-test)
+static float    g_moved = 0.0f;        // accumulated path length (diagnostic)
+static int      g_tapX = -1, g_tapY = -1;   // landing point (for STATUS hit-test)
 static uint32_t g_lastTapMs = 0;            // STATUS double-tap detection
 static int      g_lastTapX = -9999, g_lastTapY = -9999;
 
@@ -655,9 +655,18 @@ void loop()
                 }
             }
         } else {
-            // Normal mode: a quick, small move counts as a tap. (Generous
-            // thresholds so a normal finger tap always registers.)
-            if (dur < 420 && g_moved < 26.0f) {
+            // Normal mode: a quick tap = SHORT press with little NET travel from
+            // the landing point. We use net displacement (start -> final), NOT
+            // accumulated path length: the CST816 repeats its last point with
+            // small coordinate jitter, and that jitter's total variation grows
+            // with sample count, so it silently pushed `g_moved` past the
+            // threshold on ordinary taps (making single- and double-taps dead).
+            // Net travel stays tiny for a still finger and large for a real drag.
+            int ndx = g_lastX - g_tapX, ndy = g_lastY - g_tapY;
+            float net = sqrtf((float)ndx * ndx + (float)ndy * ndy);
+            Serial.printf("[touch] rel t=%lums path=%.0f net=%.0f\n",
+                          (unsigned long)dur, g_moved, net);
+            if (dur < 420 && net < 30.0f) {
                 if (scene.mode == 5) {
                     // STATUS mode: hit-test the tap against the nearest widget.
                     //   single-tap a widget  -> pulse it

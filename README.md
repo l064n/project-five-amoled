@@ -278,10 +278,23 @@ The first build downloads the ESP32 toolchain; after that builds are fast.
 > (auto-spin + inertia); only the drag/tap input is disabled.
 
 ## Serial monitor
-
+ 
 `ARDUINO_USB_CDC_ON_BOOT=1` is set, so `Serial` maps to the native USB port —
 connect over USB, no UART bridge needed. Monitor at 115200 baud. Boot prints a
 banner plus the touch status.
+
+**Touch diagnostic** — `scripts/touch_monitor.py` opens the port *without*
+resetting the board, jumps to the STATUS scene, and streams every touch event.
+Each finger-up prints a line like
+`[touch] rel t=<dur>ms path=<accum> net=<start→release travel>` followed by the
+action (`[touch] tap -> widget N`, `double-tap -> focus widget N`,
+`double-tap -> overview`, or `tap -> palette ...`). A tap counts when `net < 30`
+(net displacement, not accumulated path — the CST816 jitters its repeated point,
+and its total variation was previously tripping the old threshold).
+
+```
+.venv/bin/python -u scripts/touch_monitor.py 180   # 3-minute window
+```
 
 ## References
 
