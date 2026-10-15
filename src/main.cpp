@@ -157,16 +157,23 @@ static bool solve3(double M[3][3], double B[3])
 
 static void buildNormal(double M[3][3], double B[3], bool isX)
 {
-    double Sxx=0,Syy=0,Sxy=0,Sr=0,Sxxs=0,Syys=0,Srs=0;
+    // Normal equations for the affine fit t = w0*rx + w1*ry + w2:
+    //   [ Σrx²  Σrx·ry  Σrx ][w0]   [ Σrx·t ]
+    //   [ Σrx·ry Σry²  Σry ][w1] = [ Σry·t ]
+    //   [ Σrx   Σry   N   ][w2]   [ Σt    ]
+    // (BUGFIX: M[1][2] and M[2][1] previously used Σrx instead of Σry — Σry was
+    //  never even accumulated — which corrupted the fit and collapsed screen-x
+    //  to ~0 on this panel.)
+    double Sxx=0,Syy=0,Sxy=0,Sr=0,Sry=0,Sxxs=0,Syys=0,Srs=0;
     for (int i = 0; i < 4; i++) {
         double rx = g_raw[i][0], ry = g_raw[i][1];
         double t  = isX ? kCorners[i][0] : kCorners[i][1];
-        Sxx += rx*rx; Syy += ry*ry; Sxy += rx*ry; Sr += rx;
+        Sxx += rx*rx; Syy += ry*ry; Sxy += rx*ry; Sr += rx; Sry += ry;
         Sxxs += rx*t; Syys += ry*t; Srs += t;
     }
     M[0][0]=Sxx; M[0][1]=Sxy; M[0][2]=Sr;  B[0]=Sxxs;
-    M[1][0]=Sxy; M[1][1]=Syy; M[1][2]=Sr;  B[1]=Syys;
-    M[2][0]=Sr;  M[2][1]=Sr;  M[2][2]=4.0; B[2]=Srs;
+    M[1][0]=Sxy; M[1][1]=Syy; M[1][2]=Sry; B[1]=Syys;
+    M[2][0]=Sr;  M[2][1]=Sry; M[2][2]=4.0; B[2]=Srs;
 }
 
 static bool finishCalib()
@@ -179,6 +186,18 @@ static bool finishCalib()
     g_calib.ay=By[0]; g_calib.by=By[1]; g_calib.cy=By[2];
     g_calib.valid = true;
     saveCalib();
+    // Self-test: print the fitted map and round-trip each captured corner.
+    // Each "raw=(..)->(..)" should land near the corresponding target corner
+    // (0,0 / 239,0 / 0,535 / 239,535). If x stays ~0 across corners, the fit
+    // is still degenerate.
+    Serial.printf("[calib] map x=%.4f*rx + %.4f*ry + %.2f\n", g_calib.ax, g_calib.bx, g_calib.cx);
+    Serial.printf("[calib] map y=%.4f*rx + %.4f*ry + %.2f\n", g_calib.ay, g_calib.by, g_calib.cy);
+    for (int i = 0; i < 4; i++) {
+        float sx, sy;
+        toScreen(g_raw[i][0], g_raw[i][1], sx, sy);
+        Serial.printf("[calib]   raw=(%d,%d) -> (%.0f,%.0f)  target=(%.0f,%.0f)\n",
+                      g_raw[i][0], g_raw[i][1], sx, sy, kCorners[i][0], kCorners[i][1]);
+    }
     return true;
 }
 
@@ -674,12 +693,19 @@ void loop()
                     //   double-tap empty     -> reset camera to overview
                     //   single-tap empty     -> next palette (unchanged)
                     int best = -1, bd = 48 * 48; // 48 px capture radius
+                    // Diagnostic: print the tap point, every widget anchor, and
+                    // its distance, so we can see whether the finger is landing
+                    // inside a widget's hit-region or in the gaps between them.
+                    Serial.printf("[hit] tap=(%d,%d) | ", g_tapX, g_tapY);
                     for (int i = 0; i < 5; i++) {
                         int ddx = g_tapX - scene.tapX[i];
                         int ddy = g_tapY - scene.tapY[i];
                         int d2 = ddx * ddx + ddy * ddy;
+                        Serial.printf("w%d=(%d,%d)d=%d ", i, scene.tapX[i], scene.tapY[i],
+                                      (int)sqrtf(d2));
                         if (d2 < bd) { bd = d2; best = i; }
                     }
+                    Serial.printf("best=%d calib=%d\n", best, (int)g_calib.valid);
                     // Double-tap = two taps close in time and space.
                     uint32_t now = millis();
                     int pdx = g_tapX - g_lastTapX, pdy = g_tapY - g_lastTapY;

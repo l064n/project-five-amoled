@@ -166,7 +166,15 @@ namespace `touch`), so it only needs to be done once.
 - Drag/tap are disabled while the calibration overlay is showing.
 - Send `C` over serial at any time to re-run calibration (e.g. after moving
   the panel or if taps drift).
-- Send `C` twice in quick succession is not needed — a single `C` restarts it.
+- On this panel the raw frame is **rotated ~90°** relative to the screen
+  (raw-X drives screen-Y and raw-Y drives screen-X, with one axis mirrored) —
+  the affine fit absorbs that, which is why the fitted `map x=` line can show
+  negative coefficients. That's expected, not an error.
+- **Helper:** `.venv/bin/python -u scripts/calibrate_touch.py` opens the port
+  (no reset), starts calibration, and walks you through the 4 corners. When
+  done it prints the fitted map and **round-trips each corner** — each
+  `raw=(..) -> (..)` should land near its target `(0,0) / (239,0) / (0,535) /
+  (239,535)`. If screen-x stays ~0 across corners, the fit is degenerate.
 
 ## The software 3D engine
 
