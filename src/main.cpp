@@ -498,10 +498,13 @@ static void processSerialCommands()
                     String ssid = line.substring(0, sp);
                     String pass = line.substring(sp + 1);
                     while (pass.startsWith(" ")) pass.remove(0, 1);
-                    if (g_wifi.setCredentials(ssid.c_str(), pass.c_str()))
-                        Serial.println("[serial] wifi: credentials stored, connecting");
-                    else
+                    if (ssid.length() == 0) {
                         Serial.println("[serial] wifi: empty ssid — not stored");
+                    } else if (g_wifi.setCredentials(ssid.c_str(), pass.c_str())) {
+                        Serial.println("[serial] wifi: credentials stored, connecting");
+                    } else {
+                        Serial.println("[serial] wifi: failed to store credentials (NVS error)");
+                    }
                 } else {
                     Serial.println("[serial] usage: N <ssid> <pass>");
                 }

@@ -64,7 +64,7 @@ bool WiFiManager::setCredentials(const char *ssid, const char *pass)
     m_pass[sizeof(m_pass) - 1] = 0;
 
     Preferences p;
-    if (!p.begin(NS_WIFI, true)) return false;
+    if (!p.begin(NS_WIFI, false)) return false; // read-write: creates the namespace
     p.putString(KEY_SSID, m_ssid);
     p.putString(KEY_PASS, m_pass);
     p.end();
@@ -78,7 +78,7 @@ bool WiFiManager::setCredentials(const char *ssid, const char *pass)
 void WiFiManager::forget()
 {
     Preferences p;
-    if (p.begin(NS_WIFI, true)) {
+    if (p.begin(NS_WIFI, false)) {
         p.clear();
         p.end();
     }
