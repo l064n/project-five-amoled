@@ -470,6 +470,9 @@ void pageWeatherLabels(Engine3D &e, const Rot &m, float oy, float t,
     V3 c = { 0.0f, oy - 40.0f, 0.0f };
     int sx, sy;
     if (!proj(e, c, m, sx, sy)) return;
+    // Title. Other pages sit at (page center - 210); this frame's origin is
+    // the globe center (oy - 40), so the same height is sy - 170 here.
+    drawStrSC(e, sx, sy - 170, "WEATHER", 3, 120, 200, 255);
     if (wvalid) {
         // Big temperature readout.
         char tmp[8];

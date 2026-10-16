@@ -87,7 +87,7 @@ public:
     void   statusScrollBy(int d);      // relative page step
     void   statusDragBegin();
     void   statusDragBy(float dp);     // 1:1 continuous (pages) while dragging
-    void   statusDragEnd(float vel);   // release: apply fling, then snap
+    void   statusDragEnd(float vel);   // release: flick -> one page, else settle
     void   statusEase();               // called per frame: ease scroll -> target
 
     // Per-pixel hue offset applied on top of the palette base hue (degrees).

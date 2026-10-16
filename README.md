@@ -95,7 +95,9 @@ Toggle to it with the **button** (short press) or **`M`** over serial.
 #### Navigating (scroll + pivot)
 
 - **Drag up / down** — scroll between the full-screen pages (they slide in and
-  out; a quick flick flings to the next page and snaps).
+  out). A quick flick moves exactly one page in the flick direction and snaps;
+  a slow release settles on the nearest page. Releases are capped at one page
+  so you can't fling past a view.
 - **Drag left / right** — pivot (yaw) the focused 3D widget in place, with
   momentum on release.
 - **Single-tap** — fire the current page's pulse.

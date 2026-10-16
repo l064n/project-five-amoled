@@ -398,8 +398,10 @@ void Scene::flushPerf(uint32_t n) {
 // statusScroll is a continuous page index in [0, STATUS_PAGES-1]. The focused
 // page (round(statusScroll)) fills the screen; neighbors slide in/out as the
 // value moves. Vertical drag drives it 1:1 (statusDragging); on release we
-// apply a fling to the target, clamp to range, and statusEase() slides the
-// value there with critically-damped easing + snap.
+// pick a target page and statusEase() slides there with critically-damped
+// easing + snap. Release rules (a "pager", so views are never skipped):
+//   * fast flick  -> move exactly ONE page in the flick direction
+//   * slow release -> settle on the nearest page
 // ===========================================================================
 static inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -438,14 +440,21 @@ void Scene::statusDragBy(float dp) {
     statusScrollT = statusScroll; // while dragging, target tracks the finger
 }
 
-void Scene::statusDragEnd(float velPagesPerMs) {
+void Scene::statusDragEnd(float velPagesPerEv) {
     statusDragging = false;
-    // Fling: project the release velocity onto a target page count, clamped so
-    // a fast fling moves at most ~2 pages and never leaves the range.
-    float projected = statusScroll + velPagesPerMs * 140.0f;
-    float target = clampf(projected, 0.0f, (float)(STATUS_PAGES - 1));
-    // Snap to the nearest page for a clean settle.
-    statusScrollT = (float)(int)(target + 0.5f);
+    // Nearest page to the release position (rounded, clamped to range).
+    float nearest = (float)(int)(statusScroll + 0.5f);
+    if (nearest < 0.0f) nearest = 0.0f;
+    if (nearest > (float)(STATUS_PAGES - 1)) nearest = (float)(STATUS_PAGES - 1);
+    float target = nearest;
+    // A decisive flick moves exactly ONE page in the flick direction
+    // (dp = dy/H, so flick down = + = next page, flick up = previous).
+    // Anything slower settles on the nearest page. This caps the release at
+    // one page, so a fast swipe can never skip past a view.
+    const float flick = 0.02f; // ~10 px of travel per touch event
+    if (velPagesPerEv > flick)      target = nearest + 1.0f;
+    else if (velPagesPerEv < -flick) target = nearest - 1.0f;
+    statusScrollT = clampf(target, 0.0f, (float)(STATUS_PAGES - 1));
     statusVel = 0.0f;
 }
 
