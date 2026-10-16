@@ -479,8 +479,10 @@ void pageWeatherLabels(Engine3D &e, const Rot &m, float oy, float t,
         snprintf(tmp, sizeof(tmp), "%d.%d", (int)(temp10 / 10),
                  (int)((temp10 < 0 ? -temp10 : temp10) % 10));
         int S = 9;
-        drawStrSC(e, sx, sy + 45, tmp, S, 120, 230, 255);
-        e.drawNeonDot(sx + 70, sy + 55, 255, 120, 90, 7); // degree dot
+        int tw = drawStrSC(e, sx, sy + 45, tmp, S, 120, 230, 255);
+        // Degree dot sits just right of the readout (positioned off the
+        // drawn width so it tracks the digit count, incl. negative temps).
+        e.drawNeonDot(sx + tw / 2 + 9, sy + 55, 255, 120, 90, 7);
         // Condition label.
         const char *cond = WeatherClient::wmoName(wcode);
         drawStr(e, sx - (int)(strlen(cond) * 2), sy + 130, cond, 90, 200, 240);

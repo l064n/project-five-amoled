@@ -146,7 +146,8 @@ bool WeatherClient::fetchWeather()
 {
     String path = String("/v1/forecast?latitude=") + String(m_lat, 4) +
                   "&longitude=" + String(m_lon, 4) +
-                  "&current_weather=true";
+                  "&current_weather=true"
+                  "&temperature_unit=fahrenheit";
     String body;
     if (!httpGet(WX_HOST, HTTPS_PORT, path.c_str(), body)) return false;
 
@@ -165,7 +166,7 @@ bool WeatherClient::fetchWeather()
     jsonFindNumber(sub, "windspeed", wind);
     jsonFindNumber(sub, "weathercode", code);
 
-    Serial.printf("[wx] weather: %.1f C  code=%d  wind=%.1f km/h\n",
+    Serial.printf("[wx] weather: %.1f F  code=%d  wind=%.1f km/h\n",
                   temp, (int)code, wind);
 
     statusLock();

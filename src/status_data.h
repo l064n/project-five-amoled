@@ -33,7 +33,7 @@ struct StatusData {
     volatile uint32_t fps;
     // ---- weather (fetched over the WiFi link) ----
     volatile uint32_t w_valid;   // 1 = have a current reading
-    volatile int32_t  temp_x10;  // °C * 10 (e.g. 215 = 21.5)
+    volatile int32_t  temp_x10;  // °F * 10 (e.g. 715 = 71.5)
     volatile uint32_t wcode;     // WMO weather code
     volatile int32_t  wind_x10;  // km/h * 10
     char              city[16];
