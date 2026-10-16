@@ -8,7 +8,8 @@ namespace {
 constexpr const char *GEO_HOST = "ipapi.co";
 constexpr const char *GEO_PATH = "/json";
 constexpr const char *WX_HOST = "api.open-meteo.com";
-constexpr uint32_t REFRESH_MS = 30UL * 60UL * 1000UL; // 30 min
+constexpr uint32_t REFRESH_MS = 30UL * 60UL * 1000UL; // 30 min (after a success)
+constexpr uint32_t RETRY_MS   = 30UL * 1000UL;        // 30 s  (after a failure)
 constexpr int HTTPS_PORT = 443;
 constexpr size_t MAX_BODY = 2048; // both responses are small
 }
@@ -103,19 +104,13 @@ bool WeatherClient::httpGet(const char *host, int port, const char *path, String
     out = "";
     WiFiClientSecure *client = new WiFiClientSecure;
     if (!client) return false;
-    // Verify the server cert by default. The insecure latch only relaxes this
-    // AFTER a verified handshake has failed once (logged, documented).
-    if (m_insecureOk) client->setInsecure(); // no-arg: call to enable, skip for secure
-
+    // No CA bundle is embedded, so skip chain verification (documented
+    // trade-off for this non-sensitive payload). Bounded timeouts so a
+    // stalled connect/handshake can't hang a core into the task watchdog.
+    client->setInsecure();
+    client->setTimeout(5);             // 5 s socket I/O timeout
+    client->setHandshakeTimeout(5000); // 5 s TLS handshake cap
     bool ok = doGet(client, host, path, out);
-    // A non-200 / negative code means connect or TLS failure. Retry once,
-    // insecure, to survive a missing/rotated CA on a personal dashboard.
-    if (!ok && !m_insecureOk) {
-        Serial.printf("[wx] connect/TLS failed for %s — retrying insecure ONCE\n", host);
-        m_insecureOk = true;
-        client->setInsecure();
-        ok = doGet(client, host, path, out);
-    }
     delete client;
     return ok;
 }
@@ -143,6 +138,7 @@ bool WeatherClient::fetchLocation()
     g_status.lat = m_lat;
     g_status.lon = m_lon;
     statusUnlock();
+    m_haveLocation = true;
     return true;
 }
 
@@ -179,7 +175,6 @@ bool WeatherClient::fetchWeather()
     g_status.w_valid = 1;
     g_status.lastFetchMs = millis();
     statusUnlock();
-    m_lastFetchMs = millis();
     return true;
 }
 
@@ -191,23 +186,26 @@ void weatherTaskFn(void *arg)
         bool connected = (g_status.state == WIFI_CONNECTED);
         uint32_t now = millis();
 
+        // Retry cadence: 30 min after a success, 30 s after a failure.
+        uint32_t cadence = self->m_lastOk ? REFRESH_MS : RETRY_MS;
+        bool due = self->m_lastAttemptMs != 0 &&
+                   (now - self->m_lastAttemptMs) >= cadence;
         bool doFetch = connected &&
-            (!wasConnected ||                       // just (re)connected
+            (!wasConnected ||              // just (re)connected
              self->m_force ||
-             (self->m_lastFetchMs != 0 &&
-              now - self->m_lastFetchMs >= REFRESH_MS));
+             due);
 
         if (doFetch) {
             self->m_force = false;
-            if (self->m_lastFetchMs == 0) {
-                // First time: need location before weather.
-                if (self->fetchLocation() && self->fetchWeather()) {
-                    Serial.println("[wx] initial fetch OK");
-                }
-            } else {
-                // Subsequent: location rarely changes; refresh weather only.
-                self->fetchWeather();
-            }
+            // Need a location before we can query the weather API.
+            if (!self->m_haveLocation) self->fetchLocation();
+            bool wxOk = false;
+            if (self->m_haveLocation) wxOk = self->fetchWeather();
+            self->m_lastOk = wxOk;
+            self->m_lastAttemptMs = now;
+            if (self->m_lastOk) Serial.println("[wx] fetch OK");
+            else Serial.printf("[wx] fetch failed — retry in %lu s\n",
+                               (unsigned long)(RETRY_MS / 1000UL));
         }
         wasConnected = connected;
         vTaskDelay(pdMS_TO_TICKS(1000)); // 1 Hz poll of wifi state
@@ -216,7 +214,11 @@ void weatherTaskFn(void *arg)
 
 void WeatherClient::begin()
 {
-    xTaskCreatePinnedToCore(weatherTaskFn, "weather", 8192, this, 1, &m_task, 1);
+    // Core 0: co-resides with lwIP (tcpip thread) + the Arduino loop. Keeping
+    // the blocking network/TLS work OFF core 1 — which runs the real-time
+    // 60 Hz render/blit task — avoids cross-core spinlock contention that
+    // trips the task watchdog.
+    xTaskCreatePinnedToCore(weatherTaskFn, "weather", 8192, this, 1, &m_task, 0);
     Serial.println("[wx] weather task started (refresh 30 min, 'L' to force)");
 }
 

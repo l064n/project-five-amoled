@@ -12,14 +12,20 @@ void Engine3D::begin(int w, int h)
     focal_ = (W < H) ? W : H;           // ~min dimension as focal length
     if (!fb) {
         size_t n = (size_t)W * H * sizeof(uint16_t);
-        // Prefer internal DRAM: far faster than PSRAM for the per-frame
-        // clear + QSPI blit. Fall back to PSRAM if no contiguous block fits.
+        // The 240x536x16 fb is 251 KB — it must live in PSRAM: the WiFi stack
+        // needs ~50 KB of *contiguous internal* DRAM, which does not fit
+        // alongside a 251 KB internal allocation (esp_wifi_init -> ESP_ERR_NO_MEM).
+        // The S3's GDMA reads OPI PSRAM directly for the QSPI blit (lcd_fill()
+        // already DMA-pushes from a ps_malloc buffer), so PSRAM is safe here.
+        // Fall back to internal only if PSRAM is unavailable (WiFi won't work then).
         uint32_t caps = 0;
-        fb = (uint16_t *)heap_caps_malloc(n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (fb) { caps = MALLOC_CAP_INTERNAL; }
-        else {
+        if (psramFound()) {
             fb = (uint16_t *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             if (fb) caps = MALLOC_CAP_SPIRAM;
+        }
+        if (!fb) {
+            fb = (uint16_t *)heap_caps_malloc(n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (fb) caps = MALLOC_CAP_INTERNAL;
         }
         memset(fb, 0, n);
         Serial.printf("[fb] %u bytes in %s (free_int=%u free_psram=%u)\n",

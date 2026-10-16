@@ -11,9 +11,10 @@ void statusBegin()
         g_statusMtx = xSemaphoreCreateMutex();
 }
 
-void statusIpToStr(uint32_t ip, char *out8)
+void statusIpToStr(uint32_t ip, char *out)
 {
-    if (!ip) { strcpy(out8, "?"); return; }
-    snprintf(out8, 8, "%u.%u.%u.%u",
+    // Out buffers are >= 16 bytes ("255.255.255.255" = 15 + NUL).
+    if (!ip) { strcpy(out, "?"); return; }
+    snprintf(out, 16, "%u.%u.%u.%u",
              (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
 }

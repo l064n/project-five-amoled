@@ -8,9 +8,11 @@
 //   2. GET https://api.open-meteo.com/...    -> temperature, weathercode, wind
 //
 // Both endpoints are free and need no API key. Transport is WiFiClientSecure
-// (ships with the Arduino-ESP32 core) using the default CA bundle; if a TLS
-// handshake fails we log loudly and retry once with setInsecure(true) — a
-// documented trade-off for a personal dashboard (the payload is non-sensitive).
+// (ships with the Arduino-ESP32 core). No CA bundle is embedded on this
+// personal dashboard, so chain verification is skipped (setInsecure) — a
+// documented trade-off (the payload is non-sensitive weather data). All
+// socket + handshake timeouts are bounded so a stalled fetch can never hang
+// a core long enough to trip the task watchdog.
 //
 // Results are written into the shared g_status block (under its mutex) for the
 // STATUS scene to render. Refreshes every 30 min; forceRefresh() (serial 'L')
@@ -44,8 +46,9 @@ private:
 
     TaskHandle_t m_task = nullptr;
     volatile bool m_force = false;
-    bool m_insecureOk = false;   // latch: a handshake failed, allow insecure retry
-    uint32_t m_lastFetchMs = 0;
+    bool m_haveLocation = false; // location fetched at least once
+    bool m_lastOk = false;       // last fetch attempt succeeded
+    uint32_t m_lastAttemptMs = 0;// last fetch attempt (success OR failure)
     float m_lat = 0.0f, m_lon = 0.0f;
 };
 
