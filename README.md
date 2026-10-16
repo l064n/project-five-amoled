@@ -140,6 +140,15 @@ N YourWiFiName YourWiFiPassword
 Then wait a few seconds and type `W` to see the state, IP, RSSI, location, and
 weather. That's it — the credentials survive reboot.
 
+**Or use the helper script** (it waits for the board to finish booting — opening
+the port resets it — then provisions and polls until connected):
+
+```
+.venv/bin/python scripts/wifi_connect.py "YourWiFiName" "YourWiFiPassword"
+.venv/bin/python scripts/wifi_connect.py            # status only
+.venv/bin/python scripts/wifi_connect.py forget     # erase stored creds
+```
+
 Other WiFi serial commands:
 
 ```
