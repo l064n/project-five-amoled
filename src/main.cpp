@@ -50,6 +50,10 @@ static int      g_tapX = -1, g_tapY = -1;   // landing point (for STATUS hit-tes
 static uint32_t g_lastTapMs = 0;            // STATUS double-tap detection
 static int      g_lastTapX = -9999, g_lastTapY = -9999;
 
+// STATUS page-scroll fling (pages/frame) sampled during a vertical drag.
+static float    g_scrollVel = 0.0f;
+static uint32_t g_scrollVelMs = 0;
+
 // Physical button (PIN_BUTTON_1 / GPIO0, active-low w/ pull-up):
 //   short press  -> next scene mode
 //   long press   -> cycle animation speed (1x / 3x / paused)
@@ -511,28 +515,22 @@ static void processSerialCommands()
             // Force an immediate location + weather re-fetch.
             g_weather.forceRefresh();
         } else if (c == '+' || c == '=') {
-            // Zoom the STATUS camera in (toward the focused widget / center).
-            scene.setZoom(scene.zoom() * 1.4f);
-            Serial.printf("[cam] zoom %.2fx\n", scene.zoom());
+            // STATUS: scroll DOWN to the next page (eased).
+            scene.statusScrollBy(1);
+            Serial.printf("[page] -> %d\n", scene.statusIndex());
         } else if (c == '-') {
-            // Zoom the STATUS camera out (releases focus at 1x).
-            scene.setZoom(scene.zoom() / 1.4f);
-            Serial.printf("[cam] zoom %.2fx\n", scene.zoom());
+            // STATUS: scroll UP to the previous page (eased).
+            scene.statusScrollBy(-1);
+            Serial.printf("[page] -> %d\n", scene.statusIndex());
         } else if (c == '0') {
-            // Reset the STATUS camera to overview.
-            scene.resetCam();
-            Serial.println("[cam] reset (overview)");
+            // STATUS: jump back to the first page (WiFi).
+            scene.statusScrollTo(0);
+            Serial.println("[page] -> 0 (reset)");
         } else if (c == 'G' || c == 'g') {
-            // Cycle focus: overview -> widget 0 -> 1 -> ... -> 4 -> overview.
-            // Serial equivalent of the double-tap-on-a-widget gesture.
-            int f = (scene.focusIdx() + 1) % 6;
-            if (f == 5) {
-                scene.resetCam();
-                Serial.println("[cam] focus -> overview");
-            } else {
-                scene.focusWidget(f, Scene::ZOOM_FOCUS);
-                Serial.printf("[cam] focus -> widget %d\n", f);
-            }
+            // STATUS: cycle to the next page (wraps 0..4).
+            int p = (scene.statusIndex() + 1) % Scene::STATUS_PAGES;
+            scene.statusScrollTo(p);
+            Serial.printf("[page] -> %d\n", p);
         }
     }
 }
@@ -634,20 +632,35 @@ void loop()
             g_lastY = y;
 
             if (g_calibStep < 0) {
-                // Normal mode: drag to rotate. The model follows the finger
-                // 1:1 via accumulated deltas (telescoping to total movement).
                 // Only act when the finger actually moved: the CST816 repeats
                 // its last point between real motion, and a zero-delta sample
                 // must NOT zero the momentum (that caused mid-drag micro-stalls).
                 if (dx != 0 || dy != 0) {
                     g_moved += sqrtf((float)dx * dx + (float)dy * dy);
-                    g_ry -= dx * 0.020f;
-                    g_rx -= dy * 0.020f;
-                    g_velRy = -dx * 0.020f;
-                    g_velRx = -dy * 0.020f;
-                    // Wide pitch range so vertical drag doesn't hit a wall.
-                    if (g_rx > 1.5f) g_rx = 1.5f;
-                    if (g_rx < -1.5f) g_rx = -1.5f;
+                    if (scene.mode == 5) {
+                        // STATUS: vertical drag scrolls between full-screen
+                        // pages; horizontal drag still pivots the focused widget.
+                        if (!scene.statusDragging) scene.statusDragBegin();
+                        // One page = one screen height of vertical travel.
+                        float dp = (float)dy / (float)engine.H;
+                        scene.statusDragBy(dp);
+                        g_scrollVel = dp;          // pages/frame, for the fling
+                        g_scrollVelMs = millis();
+                        g_ry -= dx * 0.020f;       // horizontal pivots (yaw)
+                        g_velRy = -dx * 0.020f;
+                    } else {
+                        // Other modes: full drag-to-rotate.
+                        g_ry -= dx * 0.020f;
+                        g_rx -= dy * 0.020f;
+                        g_velRy = -dx * 0.020f;
+                        g_velRx = -dy * 0.020f;
+                        if (g_rx > 1.5f) g_rx = 1.5f;
+                        if (g_rx < -1.5f) g_rx = -1.5f;
+                    }
+                } else if (scene.mode == 5) {
+                    // Paused mid-drag: decay the fling so release doesn't jump.
+                    g_scrollVel = 0.0f;
+                    g_scrollVelMs = millis();
                 }
             } else {
                 g_moved += sqrtf((float)dx * dx + (float)dy * dy);
@@ -674,59 +687,38 @@ void loop()
                 }
             }
         } else {
-            // Normal mode: a quick tap = SHORT press with little NET travel from
-            // the landing point. We use net displacement (start -> final), NOT
-            // accumulated path length: the CST816 repeats its last point with
-            // small coordinate jitter, and that jitter's total variation grows
-            // with sample count, so it silently pushed `g_moved` past the
-            // threshold on ordinary taps (making single- and double-taps dead).
-            // Net travel stays tiny for a still finger and large for a real drag.
+            // STATUS: release the page-scroll drag (apply the fling + snap).
+            if (scene.mode == 5 && scene.statusDragging) {
+                float vel = (millis() - g_scrollVelMs < 80) ? g_scrollVel : 0.0f;
+                scene.statusDragEnd(vel);
+            }
+            // A quick tap = SHORT press with little NET travel from the landing
+            // point. We use net displacement (start -> final), NOT accumulated
+            // path length: the CST816 repeats its last point with small
+            // coordinate jitter, and that jitter's total variation grows with
+            // sample count, so it silently pushed `g_moved` past the threshold
+            // on ordinary taps (making single- and double-taps dead). Net travel
+            // stays tiny for a still finger and large for a real drag.
             int ndx = g_lastX - g_tapX, ndy = g_lastY - g_tapY;
             float net = sqrtf((float)ndx * ndx + (float)ndy * ndy);
             Serial.printf("[touch] rel t=%lums path=%.0f net=%.0f\n",
                           (unsigned long)dur, g_moved, net);
             if (dur < 420 && net < 30.0f) {
+                // Double-tap = two taps close in time and space.
+                uint32_t now = millis();
+                int pdx = g_tapX - g_lastTapX, pdy = g_tapY - g_lastTapY;
+                bool dbl = (now - g_lastTapMs < 450) && (pdx * pdx + pdy * pdy < 70 * 70);
+                g_lastTapMs = now; g_lastTapX = g_tapX; g_lastTapY = g_tapY;
                 if (scene.mode == 5) {
-                    // STATUS mode: hit-test the tap against the nearest widget.
-                    //   single-tap a widget  -> pulse it
-                    //   double-tap a widget  -> zoom the camera in & lock to it
-                    //   double-tap empty     -> reset camera to overview
-                    //   single-tap empty     -> next palette (unchanged)
-                    int best = -1, bd = 48 * 48; // 48 px capture radius
-                    // Diagnostic: print the tap point, every widget anchor, and
-                    // its distance, so we can see whether the finger is landing
-                    // inside a widget's hit-region or in the gaps between them.
-                    Serial.printf("[hit] tap=(%d,%d) | ", g_tapX, g_tapY);
-                    for (int i = 0; i < 5; i++) {
-                        int ddx = g_tapX - scene.tapX[i];
-                        int ddy = g_tapY - scene.tapY[i];
-                        int d2 = ddx * ddx + ddy * ddy;
-                        Serial.printf("w%d=(%d,%d)d=%d ", i, scene.tapX[i], scene.tapY[i],
-                                      (int)sqrtf(d2));
-                        if (d2 < bd) { bd = d2; best = i; }
-                    }
-                    Serial.printf("best=%d calib=%d\n", best, (int)g_calib.valid);
-                    // Double-tap = two taps close in time and space.
-                    uint32_t now = millis();
-                    int pdx = g_tapX - g_lastTapX, pdy = g_tapY - g_lastTapY;
-                    bool dbl = (now - g_lastTapMs < 450) && (pdx * pdx + pdy * pdy < 70 * 70);
-                    g_lastTapMs = now; g_lastTapX = g_tapX; g_lastTapY = g_tapY;
-                    if (best >= 0) {
-                        if (dbl) {
-                            scene.focusWidget(best, Scene::ZOOM_FOCUS);
-                            Serial.printf("[touch] double-tap -> focus widget %d\n", best);
-                        } else {
-                            scene.pulseWidget(best);
-                            Serial.printf("[touch] tap -> widget %d\n", best);
-                        }
+                    // STATUS: the whole screen is the focused page.
+                    //   single-tap -> pulse the current page
+                    //   double-tap -> next palette
+                    if (dbl) {
+                        scene.nextPalette();
+                        Serial.printf("[touch] double-tap -> palette %s\n", scene.pal().name);
                     } else {
-                        if (dbl) {
-                            scene.resetCam();
-                            Serial.println("[touch] double-tap -> overview");
-                        } else {
-                            scene.nextPalette();
-                            Serial.printf("[touch] tap -> palette %s\n", scene.pal().name);
-                        }
+                        scene.pulseWidget(scene.statusIndex());
+                        Serial.printf("[touch] tap -> pulse page %d\n", scene.statusIndex());
                     }
                 } else {
                     scene.nextPalette();

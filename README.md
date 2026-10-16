@@ -77,36 +77,34 @@ drawn as an overlay each frame.
 
 ### The STATUS mode (live WiFi + local weather)
 
-There is a 6th scene mode — **STATUS** — a status page driven by 3D interactive
-graphics. Each status is its own 3D interactive visual, laid out as a
-constellation you can orbit by dragging (and pulse by tapping):
+There is a 6th scene mode — **STATUS** — a status dashboard driven by 3D
+interactive graphics. It is a vertical stack of **five full-screen pages**, one
+per metric. Only the focused page fills the screen; scrolling moves between
+them with a smooth slide, while dragging still pivots the focused 3D widget:
 
-| Widget | What it shows |
+| Page | What it shows |
 | --- | --- |
-| **WiFi tower** | A 3D mast with concentric signal arcs that light up with RSSI; a rotating sweep beam while connecting, red blink when down |
-| **RSSI bars** | Five 3D bars at varying depth; hue shifts red→green with signal strength |
-| **IP display** | Four 3D octet cubes + a digit readout of the live IP (`?` when none) |
-| **Weather globe** | A rotating 3D wireframe sphere with the current weather icon *orbiting* it (sun / sun+cloud / cloud / fog / rain / snow / lightning, per WMO code) plus temp + city |
-| **Uptime ring** | A neon ring that fills over time + an FPS readout |
+| **0 · WiFi** | A large 3D mast with concentric signal arcs that light up with RSSI; a rotating sweep beam while connecting, red blink when down, `CONNECTED` / `CONNECTING` / `OFFLINE` state |
+| **1 · RSSI** | Five large 3D signal bars; hue shifts red→green with strength, plus a live `dBm` readout |
+| **2 · IP** | Four 3D octet cubes (bobbing) + a large address readout (`?` when none) |
+| **3 · Weather** | A large rotating 3D wireframe globe with a big temperature readout, WMO condition label, wind + city, and a large weather icon (sun / sun+cloud / cloud / fog / rain / snow / lightning) |
+| **4 · Uptime** | A large uptime-seconds readout, a circular progress ring (fills over the hour) + FPS |
 
 Toggle to it with the **button** (short press) or **`M`** over serial.
 
-#### Looking around (zoom + focus)
+#### Navigating (scroll + pivot)
 
-The STATUS constellation is rendered through a small 3D camera you can move
-around to inspect each widget up close:
+- **Drag up / down** — scroll between the full-screen pages (they slide in and
+  out; a quick flick flings to the next page and snaps).
+- **Drag left / right** — pivot (yaw) the focused 3D widget in place, with
+  momentum on release.
+- **Single-tap** — fire the current page's pulse.
+- **Double-tap** — cycle the neon **color palette**.
+- **`+` / `-`** over serial — next / previous page; **`G`** — jump to the next
+  page (wraps); **`0`** — jump back to page 0 (WiFi).
 
-- **Drag** — orbit the whole constellation (the widgets parallax in depth).
-- **Single-tap a widget** — fire its pulse.
-- **Double-tap a widget** — *zoom in and lock the camera onto it*: the widget
-  grows to fill the screen and stays pinned to center even as you drag-orbit
-  around it.
-- **Double-tap empty space** (or send `0`) — *reset* back to the overview.
-- **`+` / `-`** over serial — zoom in / out; **`G`** — cycle focus through the
-  widgets (overview → tower → bars → IP → globe → uptime → overview); **`0`**
-  — reset.
-
-In the other modes a tap still cycles the palette.
+In the other modes a drag still rotates the whole scene and a tap cycles the
+palette.
 
 #### Local weather (no API key)
 
@@ -213,10 +211,10 @@ Send these characters over the USB-serial monitor to control the running demo:
 | `N <ssid> <pass>` | Store WiFi credentials in NVS + connect (runtime provisioning) |
 | `X` / `x` | Forget stored WiFi credentials + disconnect |
 | `L` / `l` | Force an immediate location + weather re-fetch |
-| `+` / `=` | **STATUS:** zoom the camera in |
-| `-` | **STATUS:** zoom the camera out (releases focus at 1×) |
-| `0` | **STATUS:** reset the camera to the overview |
-| `G` / `g` | **STATUS:** cycle camera focus through the widgets (overview → each widget → …) |
+| `+` / `=` | **STATUS:** scroll to the next page |
+| `-` | **STATUS:** scroll to the previous page |
+| `0` | **STATUS:** jump back to page 0 (WiFi) |
+| `G` / `g` | **STATUS:** jump to the next page (wraps 0 → 1 → … → 4 → 0) |
 
 The demo also prints a performance line to serial every second while running:
 
@@ -295,8 +293,8 @@ banner plus the touch status.
 resetting the board, jumps to the STATUS scene, and streams every touch event.
 Each finger-up prints a line like
 `[touch] rel t=<dur>ms path=<accum> net=<start→release travel>` followed by the
-action (`[touch] tap -> widget N`, `double-tap -> focus widget N`,
-`double-tap -> overview`, or `tap -> palette ...`). A tap counts when `net < 30`
+action (`[touch] tap -> pulse page N` in STATUS mode, `double-tap -> palette ...`,
+or `tap -> palette ...` in the other modes). A tap counts when `net < 30`
 (net displacement, not accumulated path — the CST816 jitters its repeated point,
 and its total variation was previously tripping the old threshold).
 

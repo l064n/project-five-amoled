@@ -392,42 +392,83 @@ void Scene::flushPerf(uint32_t n) {
     for (int i = 0; i < 3; i++) g_sec[i] = 0;
 }
 
-void Scene::setZoom(float z) {
-    if (z < ZOOM_OVERVIEW) z = ZOOM_OVERVIEW;
-    if (z > 5.0f) z = 5.0f;
-    zT = z;
-    if (z <= ZOOM_OVERVIEW + 0.05f) { statusFocus = -1; cxT = cyT = czT = 0.0f; }
+// ===========================================================================
+// STATUS paged scroll model
+//
+// statusScroll is a continuous page index in [0, STATUS_PAGES-1]. The focused
+// page (round(statusScroll)) fills the screen; neighbors slide in/out as the
+// value moves. Vertical drag drives it 1:1 (statusDragging); on release we
+// apply a fling to the target, clamp to range, and statusEase() slides the
+// value there with critically-damped easing + snap.
+// ===========================================================================
+static inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+void Scene::statusReset() {
+    statusPage = 0;
+    statusScroll = statusScrollT = 0.0f;
+    statusVel = 0.0f;
+    statusDragging = false;
 }
-void Scene::focusWidget(int i, float z) {
-    if (i < 0 || i > 4) return;
-    statusFocus = i;
-    setZoom(z);
-    // Lock the camera center onto the widget's world anchor; smoothCam()
-    // eases there. It stays pinned to screen-center even while you orbit.
-    cxT = widgetAnchorW[i].x;
-    cyT = widgetAnchorW[i].y;
-    czT = widgetAnchorW[i].z;
+
+void Scene::statusScrollTo(int p) {
+    statusScrollT = clampf((float)p, 0.0f, (float)(STATUS_PAGES - 1));
+    statusVel = 0.0f;
 }
-void Scene::resetCam() {
-    statusFocus = -1; zT = ZOOM_OVERVIEW; cxT = cyT = czT = 0.0f;
+
+void Scene::statusScrollBy(int d) {
+    int p = statusIndex() + d;
+    statusScrollTo(p);
 }
-void Scene::smoothCam() {
-    static uint32_t lastCamMs = 0;
+
+void Scene::statusDragBegin() {
+    statusDragging = true;
+    statusVel = 0.0f;
+    // Grab: the target locks to the current value so no snap fights the finger.
+    statusScrollT = statusScroll;
+}
+
+void Scene::statusDragBy(float dp) {
+    // 1:1 continuous (pages). A little rubber band past the ends so the slide
+    // never feels like it hits a wall mid-gesture.
+    statusScroll += dp;
+    const float over = 0.35f;
+    if (statusScroll < -over) statusScroll = -over * (1.0f - 0.5f * (statusScroll + over));
+    if (statusScroll > (float)(STATUS_PAGES - 1) + over)
+        statusScroll = (float)(STATUS_PAGES - 1) + over * (1.0f - 0.5f * (statusScroll - (float)(STATUS_PAGES - 1)));
+    statusScrollT = statusScroll; // while dragging, target tracks the finger
+}
+
+void Scene::statusDragEnd(float velPagesPerMs) {
+    statusDragging = false;
+    // Fling: project the release velocity onto a target page count, clamped so
+    // a fast fling moves at most ~2 pages and never leaves the range.
+    float projected = statusScroll + velPagesPerMs * 140.0f;
+    float target = clampf(projected, 0.0f, (float)(STATUS_PAGES - 1));
+    // Snap to the nearest page for a clean settle.
+    statusScrollT = (float)(int)(target + 0.5f);
+    statusVel = 0.0f;
+}
+
+void Scene::statusEase() {
+    if (statusDragging) {
+        statusPage = (int)(statusScroll + 0.5f);
+        if (statusPage < 0) statusPage = 0;
+        if (statusPage > STATUS_PAGES - 1) statusPage = STATUS_PAGES - 1;
+        return;
+    }
+    static uint32_t lastMs = 0;
     uint32_t now = millis();
-    float dt = (lastCamMs ? (float)(now - lastCamMs) : 16.0f);
-    lastCamMs = now;
-    if (dt < 0.0f) dt = 16.0f;
+    float dt = (lastMs ? (float)(now - lastMs) : 16.0f);
+    lastMs = now;
+    if (dt < 1.0f) dt = 1.0f;
     if (dt > 100.0f) dt = 100.0f;
-    float a = 1.0f - expf(-dt / 110.0f); // ~95% settled in ~330 ms
-    zCur  += (zT  - zCur)  * a;
-    cxCur += (cxT - cxCur) * a;
-    cyCur += (cyT - cyCur) * a;
-    czCur += (czT - czCur) * a;
-    // Snap when settled to avoid endless sub-pixel drift.
-    if (fabsf(zCur - zT)   < 0.002f) zCur   = zT;
-    if (fabsf(cxCur - cxT) < 0.05f)  cxCur  = cxT;
-    if (fabsf(cyCur - cyT) < 0.05f)  cyCur  = cyT;
-    if (fabsf(czCur - czT) < 0.05f)  czCur  = czT;
+    // Critically-damped approach to the target page; ~95% settled in ~250 ms.
+    float a = 1.0f - expf(-dt / 80.0f);
+    statusScroll += (statusScrollT - statusScroll) * a;
+    if (fabsf(statusScroll - statusScrollT) < 0.002f) statusScroll = statusScrollT;
+    statusPage = (int)(statusScroll + 0.5f);
+    if (statusPage < 0) statusPage = 0;
+    if (statusPage > STATUS_PAGES - 1) statusPage = STATUS_PAGES - 1;
 }
 
 const char *Scene::modeName() const {

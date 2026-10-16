@@ -10,10 +10,10 @@
 //   2 MOBIUS     — a rotating wireframe Möbius strip (hue gradient + pulse).
 //   3 HELIX      — a double helix with cross rungs, counter-rotating strands.
 //   4 VORTEX     — a swirling particle galaxy (spiral disc, hue by radius).
-//   5 STATUS     — live WiFi + local-weather status page: a constellation of
-//                  interactive 3D widgets (WiFi tower, RSSI bars, IP octets,
-//                  weather globe, uptime ring) driven by the shared
-//                  StatusData (see status_data.h).
+//   5 STATUS     — live WiFi + local-weather dashboard: five full-screen 3D
+//                  pages (WiFi tower, RSSI bars, IP octets, weather globe,
+//                  uptime ring) you scroll between; drag pivots the focused
+//                  widget. Driven by the shared StatusData (see status_data.h).
 //
 // All modes share: the twinkling parallax starfield, the active palette, and
 // drag-to-rotate (rx/ry). A scaled animation clock (spinT) drives every phase,
@@ -38,7 +38,7 @@ public:
     const char *modeName() const;
     void nextMode() {
         mode = (mode + 1) % NUM_MODES;
-        if (mode != 5) resetCam(); // leaving STATUS: start fresh next time
+        if (mode == 5) statusReset(); // entering STATUS: start on the WiFi page
     }
 
     // ---- animation speed (long-press): 0 = 1x, 1 = 3x, 2 = paused ----
@@ -61,40 +61,34 @@ public:
     void nextPalette() { paletteIndex = (paletteIndex + 1) % NUM_PALETTES; }
 
     // STATUS-mode tap-to-pulse: set by main.cpp when a tap lands in this mode.
-    // pulse[0]=tower pulse[1]=bars pulse[2]=ip pulse[3]=globe pulse[4]=uptime
+    // pulse[0]=wifi pulse[1]=rssi pulse[2]=ip pulse[3]=weather pulse[4]=uptime
     volatile uint32_t pulseMs[5] = {0,0,0,0,0};
     void pulseWidget(int i) { if (i >= 0 && i < 5) pulseMs[i] = millis(); }
-    // Projected 2D anchors of the 5 widgets, updated each frame by drawStatus.
-    // main.cpp hit-tests a tap against the nearest of these.
-    int tapX[5] = {0,0,0,0,0};
-    int tapY[5] = {0,0,0,0,0};
 
-    // ---- STATUS-mode camera: smooth zoom + focus-on-widget (world space) ----
-    // The whole STATUS constellation is rendered through a camera transform
-    //   v = (world - camC) * z
-    // applied to every vertex AND label before orbit-rotation + projection,
-    // so meshes and their labels always stay locked together.
-    // zCur/camC are eased toward zT/camCT by smoothCam() each frame.
-    // When statusFocus >= 0 the camera center targets that widget's world
-    // anchor, pinning it to screen-center (stays centered even while you
-    // drag-orbit). In overview (statusFocus < 0) the center eases back to 0.
-    // Camera zoom levels for STATUS.
-    static constexpr float ZOOM_OVERVIEW = 1.5f; // default view (nicely close)
-    static constexpr float ZOOM_FOCUS    = 3.0f; // double-tap / G lock-on zoom
-    float  zCur = 1.0f;                         // eased zoom (ramps in on entry)
-    float  cxCur = 0.0f, cyCur = 0.0f, czCur = 0.0f; // eased center (world)
-    float  zT = ZOOM_OVERVIEW;                  // zoom target
-    float  cxT = 0.0f, cyT = 0.0f, czT = 0.0f;  // center target (world)
-    int    statusFocus = -1;                    // widget index locked, or -1
-    int    focusIdx() const { return statusFocus; }
-    float  zoom() const { return zCur; }
-    // World-space anchors of the 5 STATUS widgets (fixed layout), set by
-    // drawStatus each frame and read by focusWidget/main for hit-testing.
-    V3     widgetAnchorW[5];
-    void   setZoom(float z);            // clamp; zooming out also releases focus
-    void   focusWidget(int i, float z); // lock the camera to widget i at zoom z
-    void   resetCam();                   // overview: zoom 1, no focus, center 0
-    void   smoothCam();                  // ease the camera toward targets/frame
+    // ---- STATUS-mode: paged full-screen widgets ----
+    // Five full-screen "pages" (0 WiFi, 1 RSSI, 2 IP, 3 Weather, 4 Uptime).
+    // Only the focused page fills the screen; SCROLL (vertical drag) moves
+    // statusScroll between pages with a smooth slide + snap, and DRAG
+    // (horizontal) still pivots the 3D widget via the global g_ry.
+    //
+    // statusScroll is a continuous page index (0..4). While a finger is down
+    // it tracks the drag 1:1 (no clamping, so you feel the slide); on release
+    // it eases (with a little fling momentum) to the nearest page. drawStatus
+    // renders the focused page and, while 0<frac<1, the neighbor sliding in.
+    static constexpr int  STATUS_PAGES = 5;
+    int    statusPage    = 0;          // nearest/rounded page (for HUD + taps)
+    float  statusScroll  = 0.0f;       // eased continuous page index
+    float  statusScrollT = 0.0f;       // target (snapped page)
+    float  statusVel     = 0.0f;       // fling velocity (pages/frame-ish)
+    bool   statusDragging= false;      // finger is driving the scroll
+    int    statusIndex() const { return statusPage; }
+    void   statusReset();              // page 0, scroll 0
+    void   statusScrollTo(int p);      // set target page (eased)
+    void   statusScrollBy(int d);      // relative page step
+    void   statusDragBegin();
+    void   statusDragBy(float dp);     // 1:1 continuous (pages) while dragging
+    void   statusDragEnd(float vel);   // release: apply fling, then snap
+    void   statusEase();               // called per frame: ease scroll -> target
 
     // Per-pixel hue offset applied on top of the palette base hue (degrees).
     float hueShift(uint32_t t_ms) const { return fmodf((float)t_ms * 0.02f, 360.0f); }
@@ -145,9 +139,4 @@ private:
     void drawHelix(float rx, float ry);
     void drawVortex(float rx, float ry);
     void drawStatus(float rx, float ry);
-    // Weather widget (called by drawStatus): rotating wireframe globe with a
-    // billboard weather icon orbiting it, per WMO code.
-    void drawWeatherGlobe(const V3 &c, const Rot &m, float camDist, float t,
-                          uint32_t wvalid, uint32_t wcode, int32_t temp10,
-                          const char *city, float pulse);
 };

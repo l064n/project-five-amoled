@@ -1,18 +1,25 @@
 //
 // status_scene.cpp — Scene::drawStatus and its helpers (mode 5 "STATUS").
 //
-// A constellation of interactive 3D widgets rendered from the shared
-// StatusData (WiFi state/rssi/ip + live local weather + uptime/fps). The whole
-// constellation orbits with the global drag (rx/ry); a tap on a widget fires a
-// decaying pulse. Widgets:
-//   0 WiFi tower (mast + RSSI arcs + connecting sweep / off blink)
-//   1 RSSI bars (5 3D bars)
-//   2 IP octet cubes + 3x5 digit labels
-//   3 Weather globe (rotating wireframe + orbiting 3D weather icon + temp/city)
-//   4 Uptime ring + FPS
+// The STATUS mode is a vertical stack of FIVE full-screen "pages", one per
+// metric. Only the focused page fills the screen; dragging UP/DOWN scrolls
+// statusScroll (a continuous page index) so the neighbors slide in from the
+// top/bottom, and a horizontal drag still PIVOTS the focused 3D widget.
+//
+//   page 0  WiFi tower (mast + RSSI arcs + connecting sweep / off blink)
+//   page 1  RSSI signal bars (5 3D bars + dBm readout)
+//   page 2  IP address (4 octet cubes + big address readout)
+//   page 3  Weather (rotating 3D globe + orbiting icon + temp/city/wind)
+//   page 4  Uptime (big seconds + FPS + progress ring)
+//
+// Every page's 3D content is authored around the world origin and shifted
+// along +Y by (page - statusScroll) * kSH, so the focused page is pinned to
+// screen center and the slide is seamless. Labels are screen-space billboards
+// positioned relative to each page's projected center, so they track the slide.
 //
 #include "scene.h"
 #include "status_data.h"
+#include "weather_client.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -69,7 +76,6 @@ void drawGlyph(Engine3D &e, int x, int y, char c, int r, int g, int b)
                     e.addPixel(x + col, y + row, r, g, b);
         return;
     }
-    // unknown char -> small box
     e.drawNeonDot(x + 1, y + 2, r, g, b, 1);
 }
 
@@ -81,6 +87,34 @@ void drawStr(Engine3D &e, int x, int y, const char *s, int r, int g, int b)
     }
 }
 
+// Scaled 3x5 glyph: each font pixel becomes an SxS block. For big numbers.
+void drawGlyphS(Engine3D &e, int x, int y, char c, int S, int r, int g, int b)
+{
+    for (int i = 0; i < kFontN; i++) {
+        if (kFont[i].c != c) continue;
+        for (int row = 0; row < 5; row++)
+            for (int col = 0; col < 3; col++)
+                if (kFont[i].r[row] & (1 << (2 - col))) {
+                    int bx = x + col * S, by = y + row * S;
+                    for (int yy = 0; yy < S; yy++)
+                        for (int xx = 0; xx < S; xx++)
+                            if (bx + xx >= 0 && by + yy >= 0 &&
+                                bx + xx < e.W && by + yy < e.H)
+                                e.addPixel(bx + xx, by + yy, r, g, b);
+                }
+        return;
+    }
+}
+// Centered scaled string. Returns the total pixel width.
+int drawStrSC(Engine3D &e, int cx, int y, const char *s, int S, int r, int g, int b)
+{
+    int n = 0; while (s && s[n]) n++;
+    int w = n * (3 * S + S) - S;
+    int x = cx - w / 2;
+    for (int i = 0; i < n; i++) { drawGlyphS(e, x, y, s[i], S, r, g, b); x += 3 * S + S; }
+    return w;
+}
+
 // 0..1 pulse envelope from a timestamp (ms) — fast attack, ~1.1s decay.
 float pulseEnv(uint32_t tMs, uint32_t stamp)
 {
@@ -90,366 +124,254 @@ float pulseEnv(uint32_t tMs, uint32_t stamp)
     if (d < 70)  return (float)d / 70.0f;
     return 1.0f - (float)(d - 70) / 1030.0f;
 }
-// Tap feedback: a punchy scale bump (up to +80%) and a brightness flash
-// (up to +100) driven by the same envelope, so a tap is clearly visible.
 float pulseScale(float env) { return 1.0f + 0.8f * env; }
 int   pulseBoost(float env) { return (int)(100.0f * env); }
 
-// --- STATUS camera (world space): v = (world - C) * z, applied to EVERY
-// vertex and label so the 3D meshes + their text stay locked together and the
-// focused widget stays pinned to screen-center while you orbit. Set once per
-// frame in drawStatus() from the eased Scene camera.
-struct Cam { float z, cx, cy, cz; };
-Cam   g_cam    = {1.0f, 0.0f, 0.0f, 0.0f};
-float g_lscale = 1.0f;   // label / icon pixel scale (derived from zoom)
+// --- STATUS paged layout (world space) ---
+// Each page's 3D content is authored around the world origin, then shifted
+// along +Y by (page - statusScroll) * kSH. kSH = one screen height in world
+// units (CD*H/focal = 430*536/240 ~ 964), so the focused page (frac ~ 0) sits
+// exactly at screen center and its neighbors fill the screen just off the
+// top/bottom edge. The shift is applied BEFORE the global rotation, so a
+// horizontal drag (ry) pivots the focused widget in place while a vertical
+// scroll carries the pages up/down the screen.
+const float kCD = 430.0f;   // camera distance (matches Scene::CAM_DIST region)
+const float kSH = 964.0f;   // one screen height in world units
 
-inline V3 camX(const V3 &p) {
-    return { (p.x - g_cam.cx) * g_cam.z,
-             (p.y - g_cam.cy) * g_cam.z,
-             (p.z - g_cam.cz) * g_cam.z };
-}
-// Scale a length by the label scale (min 1 px).
-inline int scl(float v) { int s = (int)(v * g_lscale + 0.5f); return s < 1 ? 1 : s; }
-
-// Project a world point (through the camera) under rotation m to screen.
-bool proj(Engine3D &e, const V3 &p, const Rot &m, float camDist, int &sx, int &sy)
+// Project a world point under rotation m to screen.
+bool proj(Engine3D &e, const V3 &p, const Rot &m, int &sx, int &sy)
 {
-    V3 pc = camX(p);
     V3 r;
-    rotateMat(pc.x, pc.y, pc.z, m, r);
+    rotateMat(p.x, p.y, p.z, m, r);
     int d;
-    return e.project(r.x, r.y, r.z + camDist, sx, sy, d);
+    return e.project(r.x, r.y, r.z + kCD, sx, sy, d);
 }
 
-// Draw a 3D segment between two world points (through the camera). Culls if
-// either end is behind the camera.
-void seg3(Engine3D &e, const V3 &a, const V3 &b, const Rot &m, float camDist,
-          int r, int g, int bl, int inten, int core, int glow)
+// 3D segment with a 0..1 slide-fade (`vis`) multiplied into the intensity.
+void seg3(Engine3D &e, const V3 &a, const V3 &b, const Rot &m,
+          int r, int g, int bl, int inten, int core, int glow, float vis)
 {
-    e.renderSegmentMat(camX(a), camX(b), m, camDist, r, g, bl, inten, core, glow);
+    int it = (int)(inten * vis);
+    if (it < 8) return;
+    e.renderSegmentMat(a, b, m, kCD, r, g, bl, it, core, glow);
 }
 
-} // namespace
-
-// ===========================================================================
-// Scene::drawStatus
-// ===========================================================================
-void Scene::drawStatus(float rx, float ry)
+// Slide visibility for a page at fractional offset `f` (0 = fully visible).
+// Fades out over the outer 0.35 of a page so off-screen neighbors are culled.
+float pageVis(float f)
 {
-    // Snapshot the shared status (brief mutex) so the whole frame is coherent.
-    uint32_t st, ip, wcode, wvalid, upt, fps, lastF;
-    int32_t rssi, temp10, wind10;
-    char city[16];
-    statusLock();
-    st = g_status.state; ip = g_status.ip; rssi = g_status.rssi;
-    wcode = g_status.wcode; wvalid = g_status.w_valid;
-    temp10 = g_status.temp_x10; wind10 = g_status.wind_x10;
-    upt = g_status.uptime_s; fps = g_status.fps; lastF = g_status.lastFetchMs;
-    memcpy(city, g_status.city, sizeof(city));
-    city[sizeof(city) - 1] = 0;
-    statusUnlock();
+    float a = fabsf(f);
+    if (a >= 1.35f) return 0.0f;
+    if (a > 1.0f) return (1.35f - a) / 0.35f;
+    return 1.0f;
+}
 
-    smoothCam(); // advance the eased zoom + focus-center camera
-    const float t = spinT;
-    // Dampen user orbit so the widgets stay readable, but still respond.
-    Rot mG = makeRot(rx * 0.5f, ry * 0.5f, 0.0f);
-    const float CD = 430.0f;
+// ===========================================================================
+// PAGE 0 — WiFi tower (full screen)
+// ===========================================================================
+void pageWiFi(Engine3D &e, const Rot &m, float oy, float t,
+              uint32_t st, float lvl, float pulse, float vis)
+{
+    if (vis <= 0.0f) return;
+    bool up = (st == WIFI_CONNECTED);
+    bool conn = (st == WIFI_CONNECTING);
+    int r = up ? 80 : 255, g = up ? 230 : 70, b = up ? 255 : 70;
+    if (!up && ((millis() / 400) & 1)) { r = 120; g = 30; b = 30; }
+    float s = pulseScale(pulse);
+    int boost = pulseBoost(pulse);
+    if (r + boost > 255) r = 255; if (g + boost > 255) g = 255; if (b + boost > 255) b = 255;
 
-    // Layout anchors (world space), at different depths for parallax.
-    const V3 towerC  = { -55.0f,  120.0f,   0.0f };
-    const V3 barsC   = {  55.0f,  120.0f,   0.0f };
-    const V3 ipC     = {   0.0f,   40.0f,  40.0f };
-    const V3 globeC  = {  -45.0f,  -45.0f,  60.0f };
-    const V3 ringC   = {  55.0f,  -55.0f,  30.0f };
-    widgetAnchorW[0] = towerC; widgetAnchorW[1] = barsC; widgetAnchorW[2] = ipC;
-    widgetAnchorW[3] = globeC; widgetAnchorW[4] = ringC;
-
-    // Apply the eased camera (zoom + center) for this frame, and derive the
-    // label/icon pixel scale from the zoom so text grows with the widgets.
-    g_cam.z  = zCur;  g_cam.cx = cxCur;  g_cam.cy = cyCur;  g_cam.cz = czCur;
-    g_lscale = 0.55f + 0.45f * zCur;
-
-    // Pulse envelopes per widget.
-    float pTower = pulseEnv(millis(), pulseMs[0]);
-    float pBars  = pulseEnv(millis(), pulseMs[1]);
-    float pIp    = pulseEnv(millis(), pulseMs[2]);
-    float pGlobe = pulseEnv(millis(), pulseMs[3]);
-    float pRing  = pulseEnv(millis(), pulseMs[4]);
-
-    // RSSI -> 0..1 level (map -90..-35 dBm).
-    float lvl = 0.0f;
-    if (st == WIFI_CONNECTED && rssi) {
-        lvl = (float)(rssi + 90) / 55.0f;
-        if (lvl < 0) lvl = 0; if (lvl > 1) lvl = 1;
-    }
-
-    // ------------------------------------------------------------------ TOWER
-    {
-        bool up = (st == WIFI_CONNECTED);
-        bool conn = (st == WIFI_CONNECTING);
-        bool fail = (st == WIFI_FAILED);
-        int r = up ? 80 : 255, g = up ? 230 : 70, b = up ? 255 : 70;
-        // Off/failed: blink.
-        if (!up && ((millis() / 400) & 1)) { r = 120; g = 30; b = 30; }
-        // Tap pulse: punchy scale + brightness flash.
-        float s = pulseScale(pTower);
-        int boost = pulseBoost(pTower);
-        if (r + boost > 255) r = 255; if (g + boost > 255) g = 255; if (b + boost > 255) b = 255;
-        V3 base = towerC, tip = towerC; tip.y += 60.0f * s;
-        // Mast.
-        V3 mb = { towerC.x, towerC.y, towerC.z }, mt = { towerC.x, towerC.y + 60.0f * s, towerC.z };
-        seg3(e_, mb, mt, mG, CD, r, g, b, 200 + boost, 2, 2);
-        // Arcs: three concentric, lit by level.
-        for (int a = 0; a < 3; a++) {
-            float rad = 14.0f + a * 13.0f;
-            float lit = (lvl * 3.0f > (float)a) ? 1.0f : 0.18f;
-            int ir = (int)(r * lit), ig = (int)(g * lit), ib = (int)(b * lit);
-            int inten = (int)(120 + 135.0f * lit) + boost;
-            int N = 14;
-            V3 pa, pb;
-            for (int i = 0; i < N; i++) {
-                float a0 = M_PI * (0.25f + 0.5f * (float)i / (float)N);
-                float a1 = M_PI * (0.25f + 0.5f * (float)(i + 1) / (float)N);
-                pa.x = tip.x + rad * s * sinf(a0); pa.y = tip.y + rad * s * cosf(a0) - 6.0f; pa.z = tip.z;
-                pb.x = tip.x + rad * s * sinf(a1); pb.y = tip.y + rad * s * cosf(a1) - 6.0f; pb.z = tip.z;
-                seg3(e_, pa, pb, mG, CD, ir, ig, ib, inten, 1, a < 2 ? 1 : 0);
-            }
-        }
-        // Connecting: a sweeping beam from the tip.
-        if (conn || fail) {
-            float sw = fmodf(t * 0.004f, 2.0f * M_PI);
-            V3 a0 = { tip.x, tip.y, tip.z };
-            V3 a1 = { tip.x + 34.0f * sinf(sw), tip.y + 34.0f * cosf(sw), tip.z };
-            seg3(e_, a0, a1, mG, CD, r, g, b, 160, 1, 1);
-        }
-        // Label.
-        int sx, sy;
-        if (proj(e_, towerC, mG, CD, sx, sy)) { tapX[0] = sx; tapY[0] = sy; drawStr(e_, sx - scl(16), sy + scl(30), "WIFI", r, g, b); }
-        else { tapX[0] = e_.W / 2; tapY[0] = 0; }
-    }
-
-    // ------------------------------------------------------------------ BARS
-    {
-        int lit = (int)(lvl * 5.0f + 0.5f);
-        int N = 5, bw = 8, gap = 5;
-        float bsScale = pulseScale(pBars);
-        int bboost = pulseBoost(pBars);
+    float baseY = oy - 120.0f, tipY = oy + 130.0f * s;
+    // Mast.
+    seg3(e, {0, baseY, 0}, {0, tipY, 0}, m, r, g, b, 200 + boost, 3, 3, vis);
+    // Base platform.
+    seg3(e, {-44, baseY, 0}, {44, baseY, 0}, m, r, g, b, 130 + boost, 2, 1, vis);
+    // Arcs: three concentric, lit by level.
+    for (int a = 0; a < 3; a++) {
+        float rad = 40.0f + a * 30.0f;
+        float lit = (lvl * 3.0f > (float)a) ? 1.0f : 0.18f;
+        int ir = (int)(r * lit), ig = (int)(g * lit), ib = (int)(b * lit);
+        int inten = (int)(120 + 135.0f * lit) + boost;
+        const int N = 22;
         for (int i = 0; i < N; i++) {
-            float hgt = (14.0f + i * 12.0f) * bsScale;
-            bool on = (i < lit);
-            // Strength hue: red->green as i rises.
-            int r = on ? (int)(120 - 90.0f * (float)i / (float)N) : 40;
-            int g = on ? (int)(80 + 150.0f * (float)i / (float)N) : 40;
-            int b = on ? 120 : 60;
-            r += bboost; if (r > 255) r = 255;
-            g += bboost; if (g > 255) g = 255;
-            b += bboost; if (b > 255) b = 255;
-            float x = barsC.x - (float)(N - 1) * (bw + gap) * 0.5f + (float)i * (bw + gap);
-            V3 b0 = { x, barsC.y, barsC.z };
-            V3 b1 = { x + bw, barsC.y, barsC.z };
-            V3 t0 = { x, barsC.y + hgt, barsC.z };
-            V3 t1 = { x + bw, barsC.y + hgt, barsC.z };
-            int inten = (on ? 220 : 60) + bboost;
-            seg3(e_, b0, b1, mG, CD, r, g, b, inten, 2, 0);      // bottom
-            seg3(e_, t0, t1, mG, CD, r, g, b, inten, 2, 0);      // top
-            seg3(e_, b0, t0, mG, CD, r, g, b, inten, 2, 0);      // left
-            seg3(e_, b1, t1, mG, CD, r, g, b, inten, 2, 0);      // right
+            float a0 = M_PI * (0.25f + 0.5f * (float)i / N);
+            float a1 = M_PI * (0.25f + 0.5f * (float)(i + 1) / N);
+            V3 pa = { rad * s * sinf(a0), tipY + rad * s * cosf(a0) - 10.0f, 0 };
+            V3 pb = { rad * s * sinf(a1), tipY + rad * s * cosf(a1) - 10.0f, 0 };
+            seg3(e, pa, pb, m, ir, ig, ib, inten, 2, a < 2 ? 1 : 0, vis);
         }
-        int sx, sy;
-        if (proj(e_, barsC, mG, CD, sx, sy)) { tapX[1] = sx; tapY[1] = sy; drawStr(e_, sx - scl(12), sy + scl(26), "RSSI", 120, 200, 255); }
-        else { tapX[1] = e_.W / 2; tapY[1] = 0; }
     }
-
-    // -------------------------------------------------------------------- IP
-    {
-        char ipbuf[20];
-        statusIpToStr(ip, ipbuf);
-        int sx, sy;
-        // 4 small cubes (one per octet) in a row, + digit label below.
-        int ipb = pulseBoost(pIp);
-        for (int o = 0; o < 4; o++) {
-            float x = ipC.x - 33.0f + (float)o * 22.0f;
-            float y = ipC.y;
-            float z = ipC.z;
-            float s = 9.0f * pulseScale(pIp);
-            V3 v[8] = {
-                { x - s, y - s, z - s }, { x + s, y - s, z - s },
-                { x + s, y + s, z - s }, { x - s, y + s, z - s },
-                { x - s, y - s, z + s }, { x + s, y - s, z + s },
-                { x + s, y + s, z + s }, { x - s, y + s, z + s } };
-            int e12[6][2] = { {0,1},{1,2},{2,3},{3,0} };
-            int e45[4][2] = { {4,5},{5,6},{6,7},{7,4} };
-            int c48[4][2] = { {0,4},{1,5},{2,6},{3,7} };
-            int inten = 200 + ipb;
-            for (int i = 0; i < 4; i++) { seg3(e_, v[e12[i][0]], v[e12[i][1]], mG, CD, 90, 230, 255, inten, 1, 1); seg3(e_, v[e45[i][0]], v[e45[i][1]], mG, CD, 90, 230, 255, inten, 1, 1); seg3(e_, v[c48[i][0]], v[c48[i][1]], mG, CD, 90, 230, 255, inten, 1, 1); }
-        }
-        if (proj(e_, ipC, mG, CD, sx, sy)) {
-            tapX[2] = sx; tapY[2] = sy;
-            drawStr(e_, sx - scl(24), sy + scl(16), ipbuf, 120, 235, 255);
-        } else { tapX[2] = e_.W / 2; tapY[2] = 0; }
+    // Connecting / failed: a sweeping beam from the tip.
+    if (conn || st == WIFI_FAILED) {
+        float sw = fmodf(t * 0.004f, 2.0f * M_PI);
+        seg3(e, {0, tipY, 0}, {54.0f * sinf(sw), tipY + 54.0f * cosf(sw), 0},
+             m, r, g, b, 170 + boost, 2, 1, vis);
     }
-
-    // --------------------------------------------------------------- UPTIME
-    {
-        // A 5x5 neon ring filled by uptime fraction (mod 3600 s), + FPS.
-        float frac = (float)(upt % 3600) / 3600.0f;
-        int filled = (int)(frac * 12.0f); // ~12 ring pixels
-        int rb = pulseBoost(pRing);
-        int rad = 1 + (int)(2.0f * pRing);
-        int sx, sy;
-        if (proj(e_, ringC, mG, CD, sx, sy)) {
-            tapX[4] = sx; tapY[4] = sy;
-            // Draw ring template; light `filled` cells, dim the rest.
-            for (int row = 0; row < 5; row++)
-                for (int col = 0; col < 5; col++) {
-                    int px = sx - scl(8) + col * scl(4), py = sy - scl(10) + row * scl(4);
-                    if (px < 0 || py < 0 || px >= e_.W || py >= e_.H) continue;
-                    bool on = kRing5[row] & (1 << (4 - col));
-                    if (!on) continue;
-                    int idx = row * 5 + col;
-                    int inten = (idx < filled) ? 230 : 45;
-                    int r = 255, g = (int)(120 + 80.0f * (float)filled / 12.0f) + rb, b = 60 + rb;
-                    if (g > 255) g = 255; if (b > 255) b = 255;
-                    (void)inten;
-                    e_.drawNeonDot(px, py, r, g, b, rad);
-                    e_.addPixel(px, py, (r >> 2), (g >> 2), (b >> 2));
-                }
-            char buf[16];
-            snprintf(buf, sizeof(buf), "UP %lu", (unsigned long)upt);
-            drawStr(e_, sx - scl(18), sy + scl(16), buf, 255, 180, 90);
-            char fb[8];
-            snprintf(fb, sizeof(fb), "%u", (unsigned)fps);
-            drawStr(e_, sx + scl(2), sy + scl(16), "FPS " , 255, 180, 90);
-            drawStr(e_, sx + scl(22), sy + scl(16), fb, 255, 220, 120);
-        } else { tapX[4] = e_.W / 2; tapY[4] = 0; }
-    }
-
-    // ------------------------------------------------------------- WEATHER
-    {
-        int sx, sy;
-        if (proj(e_, globeC, mG, CD, sx, sy)) { tapX[3] = sx; tapY[3] = sy; }
-        else { tapX[3] = e_.W / 2; tapY[3] = 0; }
-        drawWeatherGlobe(globeC, mG, CD, t, wvalid, wcode, temp10, city, pGlobe);
-        // Temp + city labels (screen space, below the globe).
-        if (sx && sy) {
-            if (wvalid) {
-                char buf[16];
-                snprintf(buf, sizeof(buf), "%d.%dC", (int)(temp10 / 10), (int)((temp10 < 0 ? -temp10 : temp10) % 10));
-                drawStr(e_, sx - scl(16), sy + scl(34), buf, 120, 230, 255);
-                char up[16];
-                for (int i = 0; i < 12 && city[i]; i++) up[i] = (char)toupper((unsigned char)city[i]);
-                up[12] = 0;
-                drawStr(e_, sx - scl(18), sy + scl(44), up, 90, 180, 220);
-            } else {
-                drawStr(e_, sx - scl(22), sy + scl(34), "NO DATA", 120, 120, 140);
-                drawStr(e_, sx - scl(26), sy + scl(44), "WAIT WIFI", 90, 90, 110);
-            }
-        }
+    // Labels (screen space, relative to projected page center).
+    int sx, sy;
+    if (proj(e, {0, oy, 0}, m, sx, sy)) {
+        drawStrSC(e, sx, sy - 210, "WIFI", 3, r, g, b);
+        const char *stStr = up ? "CONNECTED" : (conn ? "CONNECTING" : "OFFLINE");
+        drawStr(e, sx - (int)(strlen(stStr) * 2), sy + 195, stStr, r, g, b);
     }
 }
 
 // ===========================================================================
-// Weather globe: a slowly-rotating 3D wireframe sphere (meridians + latitudes)
-// with the current weather icon ORBITING it. The icon is a screen-space
-// billboard (crisp neon) positioned at the projected orbit point, so it always
-// faces the viewer while the globe tumbles behind it.
+// PAGE 1 — RSSI signal bars (full screen)
 // ===========================================================================
-namespace {
-
-// Draw a 3D ring of `N` segments centered at `c`, radius `r`, in the plane
-// defined by unit axes u,v, rotated by `m`.
-void drawRing3D(Engine3D &e, const V3 &c, float r, const V3 &u, const V3 &v,
-                const Rot &m, float camDist, int ir, int ig, int ib, int inten)
+void pageRSSI(Engine3D &e, const Rot &m, float oy, float lvl,
+              float pulse, float vis, int32_t rssi, uint32_t st)
 {
-    const int N = 20;
+    if (vis <= 0.0f) return;
+    int lit = (int)(lvl * 5.0f + 0.5f);
+    const int N = 5, bw = 24, gap = 18;
+    float s = pulseScale(pulse);
+    int boost = pulseBoost(pulse);
+    float baseY = oy - 130.0f;
     for (int i = 0; i < N; i++) {
-        float a0 = 2.0f * M_PI * (float)i / (float)N;
-        float a1 = 2.0f * M_PI * (float)(i + 1) / (float)N;
-        V3 pa, pb;
-        pa.x = c.x + r * (u.x * cosf(a0) + v.x * sinf(a0));
-        pa.y = c.y + r * (u.y * cosf(a0) + v.y * sinf(a0));
-        pa.z = c.z + r * (u.z * cosf(a0) + v.z * sinf(a0));
-        pb.x = c.x + r * (u.x * cosf(a1) + v.x * sinf(a1));
-        pb.y = c.y + r * (u.y * cosf(a1) + v.y * sinf(a1));
-        pb.z = c.z + r * (u.z * cosf(a1) + v.z * sinf(a1));
-        e.renderSegmentMat(pa, pb, m, camDist, ir, ig, ib, inten, 1, 0);
+        float hgt = (70.0f + i * 55.0f) * s;
+        bool on = (i < lit);
+        int r = on ? (int)(150 - 110.0f * (float)i / N) : 40;
+        int g = on ? (int)(90 + 155.0f * (float)i / N) : 40;
+        int b = on ? 130 : 60;
+        r += boost; if (r > 255) r = 255;
+        g += boost; if (g > 255) g = 255;
+        b += boost; if (b > 255) b = 255;
+        float x = -(float)(N - 1) * (bw + gap) * 0.5f + (float)i * (bw + gap);
+        V3 b0 = { x, baseY, 0 }, b1 = { x + bw, baseY, 0 };
+        V3 t0 = { x, baseY + hgt, 0 }, t1 = { x + bw, baseY + hgt, 0 };
+        int inten = (on ? 230 : 55) + boost;
+        seg3(e, b0, b1, m, r, g, b, inten, 3, 1, vis);  // bottom
+        seg3(e, t0, t1, m, r, g, b, inten, 3, 1, vis);  // top
+        seg3(e, b0, t0, m, r, g, b, inten, 3, 0, vis);  // left
+        seg3(e, b1, t1, m, r, g, b, inten, 3, 0, vis);  // right
+    }
+    // Baseline.
+    seg3(e, {-(float)(N - 1) * (bw + gap) * 0.5f - 6, baseY, 0},
+           { (float)(N - 1) * (bw + gap) * 0.5f + 6, baseY, 0},
+         m, 120, 200, 255, 120 + boost, 2, 0, vis);
+    int sx, sy;
+    if (proj(e, {0, oy, 0}, m, sx, sy)) {
+        drawStrSC(e, sx, sy - 215, "RSSI", 3, 120, 200, 255);
+        char db[12];
+        if (st == WIFI_CONNECTED && rssi) snprintf(db, sizeof(db), "%d dBm", (int)rssi);
+        else snprintf(db, sizeof(db), "-- dBm");
+        drawStr(e, sx - (int)(strlen(db) * 2), sy + 190, db, 120, 200, 255);
     }
 }
 
-// --- billboard icon primitives (screen space). Sizes scale with the zoom
-// (g_lscale) so the weather icon grows with the 3D globe when focused. ---
-void iconSun(Engine3D &e, int cx, int cy, float t, float pulse, int inten)
+// ===========================================================================
+// PAGE 2 — IP address (full screen): 4 octet cubes + big readout
+// ===========================================================================
+void pageIP(Engine3D &e, const Rot &m, float oy, float t,
+            uint32_t ip, float pulse, float vis)
 {
-    float s = g_lscale;
-    int R = (int)(scl(9 + (int)(3.0f * pulse)));
+    if (vis <= 0.0f) return;
+    char ipbuf[20];
+    statusIpToStr(ip, ipbuf);
+    int boost = pulseBoost(pulse);
+    float s = pulseScale(pulse);
+    // 4 octet cubes in a row, gently bobbing.
+    for (int o = 0; o < 4; o++) {
+        float x = -78.0f + (float)o * 52.0f;
+        float y = oy + 10.0f + 8.0f * sinf(t * 0.002f + o * 0.8f);
+        float cs = 20.0f * s;
+        V3 v[8] = {
+            { x - cs, y - cs, -cs }, { x + cs, y - cs, -cs },
+            { x + cs, y + cs, -cs }, { x - cs, y + cs, -cs },
+            { x - cs, y - cs,  cs }, { x + cs, y - cs,  cs },
+            { x + cs, y + cs,  cs }, { x - cs, y + cs,  cs } };
+        const int E12[4][2] = { {0,1},{1,2},{2,3},{3,0} };
+        const int E45[4][2] = { {4,5},{5,6},{6,7},{7,4} };
+        const int C48[4][2] = { {0,4},{1,5},{2,6},{3,7} };
+        int inten = 200 + boost;
+        for (int i = 0; i < 4; i++) {
+            seg3(e, v[E12[i][0]], v[E12[i][1]], m, 90, 230, 255, inten, 2, 1, vis);
+            seg3(e, v[E45[i][0]], v[E45[i][1]], m, 90, 230, 255, inten, 2, 1, vis);
+            seg3(e, v[C48[i][0]], v[C48[i][1]], m, 90, 230, 255, inten, 2, 1, vis);
+        }
+    }
+    int sx, sy;
+    if (proj(e, {0, oy, 0}, m, sx, sy)) {
+        drawStrSC(e, sx, sy - 200, "IP", 3, 90, 230, 255);
+        // Big address below the cubes.
+        int S = ip ? 5 : 4;
+        drawStrSC(e, sx, sy + 120, ipbuf, S, 120, 235, 255);
+    }
+}
+
+// ===========================================================================
+// Weather icon primitives (screen-space billboards, scalable by k).
+// ===========================================================================
+void iconSun(Engine3D &e, int cx, int cy, float t, int k, int inten)
+{
+    int R = 16 * k;
     int ir = (int)(255 * inten), ig = (int)(210 * inten), ib = (int)(90 * inten);
     e.drawNeonDot(cx, cy, ir, ig, ib, R);
-    e.addPixel(cx, cy, 60, 50, 20);
     float spin = t * 0.001f;
-    for (int k = 0; k < 8; k++) {
-        float a = spin + (float)k * M_PI / 4.0f;
-        int x0 = cx + (int)((R + scl(3)) * cosf(a));
-        int y0 = cy + (int)((R + scl(3)) * sinf(a));
-        int x1 = cx + (int)((R + scl(7)) * cosf(a));
-        int y1 = cy + (int)((R + scl(7)) * sinf(a));
-        e.drawNeonLine(x0, y0, x1, y1, ir, ig, ib, scl(1), 1);
+    for (int i = 0; i < 8; i++) {
+        float a = spin + (float)i * M_PI / 4.0f;
+        int x0 = cx + (int)((R + 5 * k) * cosf(a));
+        int y0 = cy + (int)((R + 5 * k) * sinf(a));
+        int x1 = cx + (int)((R + 11 * k) * cosf(a));
+        int y1 = cy + (int)((R + 11 * k) * sinf(a));
+        e.drawNeonLine(x0, y0, x1, y1, ir, ig, ib, k, 1);
     }
 }
 
-void iconCloud(Engine3D &e, int cx, int cy, float drift, float pulse, int inten)
+void iconCloud(Engine3D &e, int cx, int cy, float drift, int k, int inten)
 {
-    int r = scl(4 + (int)(2.0f * pulse));
+    int r = 11 * k;
     int ir = (int)(200 * inten), ig = (int)(215 * inten), ib = (int)(235 * inten);
-    int d = (int)(drift * g_lscale);
-    int base = cy + scl(2);
-    e.drawNeonDot(cx - r - scl(1) + d, base, ir, ig, ib, r);
-    e.drawNeonDot(cx + r + scl(1) + d, base, ir, ig, ib, r);
-    e.drawNeonDot(cx + d, base - r, ir, ig, ib, r + 1);
-    e.drawNeonDot(cx + d, base + scl(1), ir, ig, ib, r);
+    int d = (int)(drift * k);
+    int base = cy + 4 * k;
+    e.drawNeonDot(cx - r - 2 * k + d, base, ir, ig, ib, r);
+    e.drawNeonDot(cx + r + 2 * k + d, base, ir, ig, ib, r);
+    e.drawNeonDot(cx + d, base - r, ir, ig, ib, r + k);
+    e.drawNeonDot(cx + d, base + 2 * k, ir, ig, ib, r);
 }
 
-void iconRain(Engine3D &e, int cx, int cy, float t, int inten)
+void iconRain(Engine3D &e, int cx, int cy, float t, int k, int inten)
 {
     int ir = (int)(90 * inten), ig = (int)(170 * inten), ib = (int)(255 * inten);
     for (int i = 0; i < 3; i++) {
-        int dx = cx - scl(5) + i * scl(5);
+        int dx = cx - 11 * k + i * 11 * k;
         float ph = fmodf(t * 0.006f + i * 0.5f, 1.0f);
-        int y = cy + scl(6) + (int)(ph * scl(12));
-        e.drawNeonLine(dx, y, dx - scl(2), y + scl(4), ir, ig, ib, 1, 0);
+        int y = cy + 12 * k + (int)(ph * 22 * k);
+        e.drawNeonLine(dx, y, dx - 4 * k, y + 8 * k, ir, ig, ib, k, 0);
     }
 }
 
-void iconSnow(Engine3D &e, int cx, int cy, float t, int inten)
+void iconSnow(Engine3D &e, int cx, int cy, float t, int k, int inten)
 {
     int ir = (int)(210 * inten), ig = (int)(235 * inten), ib = (int)(255 * inten);
     for (int i = 0; i < 3; i++) {
-        int dx = cx - scl(5) + i * scl(5);
+        int dx = cx - 11 * k + i * 11 * k;
         float ph = fmodf(t * 0.004f + i * 0.5f, 1.0f);
-        int y = cy + scl(6) + (int)(ph * scl(12));
+        int y = cy + 12 * k + (int)(ph * 22 * k);
         for (int a = 0; a < 6; a++) {
             float ang = (float)a * M_PI / 3.0f;
-            int x2 = dx + (int)(scl(3) * cosf(ang));
-            int y2 = y + (int)(scl(3) * sinf(ang));
-            e.drawNeonLine(dx, y, x2, y2, ir, ig, ib, 1, 0);
+            int x2 = dx + (int)(6 * k * cosf(ang));
+            int y2 = y + (int)(6 * k * sinf(ang));
+            e.drawNeonLine(dx, y, x2, y2, ir, ig, ib, k, 0);
         }
     }
 }
 
-void iconLightning(Engine3D &e, int cx, int cy, float t, int inten)
+void iconLightning(Engine3D &e, int cx, int cy, float t, int k, int inten)
 {
-    uint32_t cyc = (uint32_t)(t) % 1200;
+    uint32_t cyc = (uint32_t)t % 1200;
     int flash = (cyc < 70 || (cyc > 240 && cyc < 300)) ? 255 : 40;
-    flash = (int)(flash * inten);
+    flash = (int)(flash * inten / 100);
     int ir = flash, ig = (int)(flash * 0.9f), ib = (int)(flash * 0.4f);
-    int x0 = cx + scl(1), y0 = cy + scl(4);
+    int x0 = cx + 2 * k, y0 = cy + 8 * k;
     int pts[5][2] = {
-        { x0, y0 }, { x0 - scl(4), y0 + scl(6) }, { x0 - scl(1), y0 + scl(7) },
-        { x0 - scl(5), y0 + scl(13) }, { x0 - scl(2), y0 + scl(12) } };
+        { x0, y0 }, { x0 - 9 * k, y0 + 12 * k }, { x0 - 2 * k, y0 + 14 * k },
+        { x0 - 11 * k, y0 + 28 * k }, { x0 - 4 * k, y0 + 26 * k } };
     for (int i = 0; i < 4; i++)
-        e.drawNeonLine(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], ir, ig, ib, scl(1), 1);
+        e.drawNeonLine(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1], ir, ig, ib, k, 1);
 }
 
-// Map WMO code to an icon kind.
 enum WIcon { WI_NONE, WI_SUN, WI_SUN_CLOUD, WI_CLOUD, WI_FOG, WI_RAIN, WI_SNOW, WI_STORM };
 WIcon iconForCode(uint32_t c)
 {
@@ -463,71 +385,219 @@ WIcon iconForCode(uint32_t c)
     return WI_CLOUD;
 }
 
-} // namespace
-
-void Scene::drawWeatherGlobe(const V3 &c, const Rot &m, float camDist, float t,
-                             uint32_t wvalid, uint32_t wcode, int32_t temp10,
-                             const char *city, float pulse)
+// Composite weather icon at (cx,cy), scale k (1x ~ 40px, 2x ~ 80px).
+// inten is 0..100.
+void drawWeatherIcon(Engine3D &e, int cx, int cy, float t, int k, WIcon kind)
 {
-    const float R = 26.0f;
-    const float spin = t * 0.0006f;
-    (void)temp10; (void)city;
-    int inten = wvalid ? 200 : 70;
-    // Globe tint: cool cyan when valid, dim gray when not.
-    int gr = wvalid ? 70 : 60, gg = wvalid ? 150 : 70, gb = wvalid ? 200 : 90;
+    float drift = 3.0f * sinf(t * 0.0015f);
+    int inten = 100;
+    switch (kind) {
+        case WI_SUN:       iconSun(e, cx, cy, t, k, inten); break;
+        case WI_SUN_CLOUD: iconSun(e, cx - 8 * k, cy - 8 * k, t, k, 80);
+                           iconCloud(e, cx + 4 * k, cy + 4 * k, drift, k, inten); break;
+        case WI_CLOUD:     iconCloud(e, cx, cy, drift, k, inten); break;
+        case WI_FOG:       iconCloud(e, cx, cy - 2 * k, drift, k, 80);
+                           e.drawNeonLine(cx - 18 * k, cy + 12 * k, cx + 18 * k, cy + 12 * k, 150, 160, 180, k, 1);
+                           e.drawNeonLine(cx - 14 * k, cy + 16 * k, cx + 14 * k, cy + 16 * k, 120, 130, 150, k, 0);
+                           break;
+        case WI_RAIN:      iconCloud(e, cx, cy - 5 * k, drift, k, inten); iconRain(e, cx, cy - 5 * k, t, k, inten); break;
+        case WI_SNOW:      iconCloud(e, cx, cy - 5 * k, drift, k, inten); iconSnow(e, cx, cy - 5 * k, t, k, inten); break;
+        case WI_STORM:     iconCloud(e, cx, cy - 6 * k, drift, k, inten); iconLightning(e, cx, cy - 6 * k, t, k, inten); break;
+        case WI_NONE:
+        default: break;
+    }
+}
 
-    // Rotating frame: tilt the globe a bit, spin about Y.
-    Rot mLocal = makeRot(0.35f, spin, 0.0f);
-    // Combine: we apply mLocal to build world-space ring axes, then m (global).
-    // Build the two basis axes in local space, rotate by mLocal, use as ring axes.
-    V3 u = { 1.0f, 0.0f, 0.0f }, v = { 0.0f, 0.0f, 1.0f };
-    V3 ur, vr;
+// ===========================================================================
+// PAGE 3 — Weather (full screen): rotating globe + big temp + icon + meta
+// ===========================================================================
+void drawRing3D(Engine3D &e, const V3 &c, float r, const V3 &u, const V3 &v,
+                const Rot &m, int ir, int ig, int ib, int inten)
+{
+    const int N = 24;
+    for (int i = 0; i < N; i++) {
+        float a0 = 2.0f * M_PI * (float)i / N;
+        float a1 = 2.0f * M_PI * (float)(i + 1) / N;
+        V3 pa = { c.x + r * (u.x * cosf(a0) + v.x * sinf(a0)),
+                  c.y + r * (u.y * cosf(a0) + v.y * sinf(a0)),
+                  c.z + r * (u.z * cosf(a0) + v.z * sinf(a0)) };
+        V3 pb = { c.x + r * (u.x * cosf(a1) + v.x * sinf(a1)),
+                  c.y + r * (u.y * cosf(a1) + v.y * sinf(a1)),
+                  c.z + r * (u.z * cosf(a1) + v.z * sinf(a1)) };
+        e.renderSegmentMat(pa, pb, m, kCD, ir, ig, ib, inten, 1, 0);
+    }
+}
+
+void pageWeather(Engine3D &e, const Rot &m, float oy, float t,
+                 uint32_t wvalid, uint32_t wcode, int32_t temp10,
+                 int32_t wind10, const char *city, float pulse, float vis)
+{
+    if (vis <= 0.0f) return;
+    const float R = 95.0f;             // big globe, upper half of the page
+    V3 c = { 0.0f, oy - 40.0f, 0.0f }; // globe center (world y)
+    const float spin = t * 0.0006f;
+    int inten = (int)((wvalid ? 200 : 70) * vis);
+    int gr = wvalid ? 70 : 60, gg = wvalid ? 150 : 70, gb = wvalid ? 200 : 90;
+    // Rotating local frame: tilt ~0.4 rad, spin about Y.
+    Rot mLocal = makeRot(0.4f, spin, 0.0f);
+    V3 u = { 1, 0, 0 }, v = { 0, 0, 1 }, ur, vr;
     rotateMat(u.x, u.y, u.z, mLocal, ur);
     rotateMat(v.x, v.y, v.z, mLocal, vr);
-
-    // Longitude rings (4, rotated about Y by mLocal) + equator.
+    // Longitude rings (4) + equator.
     for (int i = 0; i < 4; i++) {
         float a = (float)i * M_PI / 4.0f;
-        V3 uu = { cosf(a), 0.0f, sinf(a) };
-        V3 uuR;
+        V3 uu = { cosf(a), 0.0f, sinf(a) }, uuR;
         rotateMat(uu.x, uu.y, uu.z, mLocal, uuR);
-        drawRing3D(e_, c, R, uuR, vr, m, camDist, gr, gg, gb, inten);
+        drawRing3D(e, c, R, uuR, vr, m, gr, gg, gb, inten);
     }
-    // Latitude rings (3) + equator.
-    const float lats[4] = { -0.6f, -0.2f, 0.2f, 0.6f };
-    for (int i = 0; i < 4; i++) {
+    // Latitude rings + equator.
+    const float lats[5] = { -0.7f, -0.35f, 0.0f, 0.35f, 0.7f };
+    for (int i = 0; i < 5; i++) {
         float ph = lats[i];
-        float rr = R * cosf(ph);
         V3 cc = { c.x, c.y + R * sinf(ph), c.z };
-        drawRing3D(e_, cc, rr, ur, vr, m, camDist, gr, gg, gb, (int)(inten * 0.8f));
+        drawRing3D(e, cc, R * cosf(ph), ur, vr, m, gr, gg, gb, (int)(inten * 0.8f));
     }
-    // Center dot.
-    e_.renderPointMat(c, m, camDist, gr, gg, gb, inten, 1);
+    e.renderPointMat(c, m, kCD, gr, gg, gb, inten, 1);
+}
 
-    // ---- Orbiting weather icon (billboard at projected orbit point) ----
-    float orbitR = R + 12.0f;
-    float oa = t * 0.0012f;
-    V3 ic = { c.x + orbitR * cosf(oa), c.y + 6.0f + 4.0f * sinf(oa * 2.0f), c.z + orbitR * sinf(oa) };
+// (continuation) Screen-space labels for the weather page, relative to the
+// projected globe center so they slide with the page.
+void pageWeatherLabels(Engine3D &e, const Rot &m, float oy, float t,
+                       uint32_t wvalid, uint32_t wcode, int32_t temp10,
+                       int32_t wind10, const char *city, float vis)
+{
+    if (vis <= 0.0f) return;
+    V3 c = { 0.0f, oy - 40.0f, 0.0f };
     int sx, sy;
-    if (!proj(e_, ic, m, camDist, sx, sy)) return;
-    float inten1 = (float)(wvalid ? 1.0 : 0.35) * (1.0f + 0.5f * pulse);
-    WIcon kind = wvalid ? iconForCode(wcode) : WI_NONE;
-    float drift = 3.0f * sinf(t * 0.0015f);
-    switch (kind) {
-        case WI_SUN:       iconSun(e_, sx, sy, t, pulse, (int)inten1); break;
-        case WI_SUN_CLOUD: iconSun(e_, sx - 5, sy - 5, t, pulse, 0.8f * inten1); iconCloud(e_, sx + 3, sy + 2, drift, pulse, inten1); break;
-        case WI_CLOUD:     iconCloud(e_, sx, sy, drift, pulse, inten1); break;
-        case WI_FOG:       iconCloud(e_, sx, sy - 2, drift, pulse, 0.8f * inten1);
-                           e_.drawNeonLine(sx - 10, sy + 6, sx + 10, sy + 6, 150, 160, 180, 1, 1);
-                           e_.drawNeonLine(sx - 8, sy + 9, sx + 8, sy + 9, 120, 130, 150, 1, 0);
-                           break;
-        case WI_RAIN:      iconCloud(e_, sx, sy - 3, drift, pulse, inten1); iconRain(e_, sx, sy - 3, t, inten1); break;
-        case WI_SNOW:      iconCloud(e_, sx, sy - 3, drift, pulse, inten1); iconSnow(e_, sx, sy - 3, t, inten1); break;
-        case WI_STORM:     iconCloud(e_, sx, sy - 4, drift, pulse, inten1); iconLightning(e_, sx, sy - 4, t, inten1); break;
-        case WI_NONE:
-        default:
-            // Idle: a slow-spinning dim dot (no data yet).
-            e_.drawNeonDot(sx, sy, 90, 90, 110, 2 + (int)pulse);
-            break;
+    if (!proj(e, c, m, sx, sy)) return;
+    if (wvalid) {
+        // Big temperature readout.
+        char tmp[8];
+        snprintf(tmp, sizeof(tmp), "%d.%d", (int)(temp10 / 10),
+                 (int)((temp10 < 0 ? -temp10 : temp10) % 10));
+        int S = 9;
+        drawStrSC(e, sx, sy + 45, tmp, S, 120, 230, 255);
+        e.drawNeonDot(sx + 70, sy + 55, 255, 120, 90, 7); // degree dot
+        // Condition label.
+        const char *cond = WeatherClient::wmoName(wcode);
+        drawStr(e, sx - (int)(strlen(cond) * 2), sy + 130, cond, 90, 200, 240);
+        // Wind + city.
+        char wind[12];
+        snprintf(wind, sizeof(wind), "W %d.%d", (int)(wind10 / 10),
+                 (int)((wind10 < 0 ? -wind10 : wind10) % 10));
+        drawStr(e, sx - (int)(strlen(wind) * 2), sy + 158, wind, 120, 180, 220);
+        char up[16];
+        for (int i = 0; i < 12 && city[i]; i++) up[i] = (char)toupper((unsigned char)city[i]);
+        up[12] = 0;
+        drawStr(e, sx - (int)(strlen(up) * 2), sy + 183, up, 90, 180, 220);
+        // Big orbiting weather icon, lower area of the page.
+        float oa = t * 0.0009f;
+        int ix = (int)(e.W * 0.5 + 150.0f * cosf(oa));
+        int iy = (int)(sy + 235 + 24.0f * sinf(oa * 2.0f));
+        drawWeatherIcon(e, ix, iy, t, 2, iconForCode(wcode));
+    } else {
+        drawStr(e, sx - 24, sy + 110, "NO DATA", 120, 120, 140);
+        drawStr(e, sx - 30, sy + 138, "WAIT FOR WIFI", 90, 90, 110);
+    }
+}
+
+// ===========================================================================
+// PAGE 4 — Uptime (full screen): big seconds + FPS + circular progress ring
+// ===========================================================================
+void pageUptime(Engine3D &e, const Rot &m, float oy, float t,
+                uint32_t upt, uint32_t fps, float pulse, float vis)
+{
+    if (vis <= 0.0f) return;
+    int boost = pulseBoost(pulse);
+    int sx, sy;
+    if (!proj(e, {0, oy, 0}, m, sx, sy)) return;
+    // Title.
+    drawStrSC(e, sx, sy - 210, "UPTIME", 3, 255, 180, 90);
+    // Big seconds readout, center.
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%lu", (unsigned long)upt);
+    int S = 12;
+    drawStrSC(e, sx, sy - 30, buf, S, 255, 180, 90 + boost);
+    e.addPixel(sx, sy - 30, 255, 220, 160);
+    // Circular progress ring (uptime mod 3600 / 3600).
+    float frac = (float)(upt % 3600) / 3600.0f;
+    int rad = 150;
+    int N = 64;
+    int filled = (int)(frac * N + 0.5f);
+    for (int i = 0; i < N; i++) {
+        float a0 = -M_PI / 2.0f + 2.0f * M_PI * (float)i / N;
+        float a1 = -M_PI / 2.0f + 2.0f * M_PI * ((float)i + 0.7f) / N;
+        int x0 = sx + (int)(rad * cosf(a0)), y0 = sy + 150 + (int)(rad * sinf(a0));
+        int x1 = sx + (int)(rad * cosf(a1)), y1 = sy + 150 + (int)(rad * sinf(a1));
+        bool on = (i < filled);
+        int r = 255, g = (int)(120 + 80.0f * (float)filled / N) + boost, b = 60 + boost;
+        if (g > 255) g = 255; if (b > 255) b = 255;
+        if (on) e.drawNeonLine(x0, y0, x1, y1, r, g, b, 3, 1);
+        else    e.drawNeonLine(x0, y0, x1, y1, 40, 30, 30, 1, 0);
+    }
+    // FPS at the bottom.
+    char fb[12];
+    snprintf(fb, sizeof(fb), "FPS %u", (unsigned)fps);
+    drawStr(e, sx - (int)(strlen(fb) * 2), sy + 320, fb, 255, 220, 120);
+    (void)t; (void)m;
+}
+
+} // namespace
+
+// ===========================================================================
+// Scene::drawStatus — dispatch the focused page (and sliding neighbors)
+// ===========================================================================
+void Scene::drawStatus(float rx, float ry)
+{
+    // Snapshot the shared status (brief mutex) so the whole frame is coherent.
+    uint32_t st, ip, wcode, wvalid, upt, fps;
+    int32_t rssi, temp10, wind10;
+    char city[16];
+    statusLock();
+    st = g_status.state; ip = g_status.ip; rssi = g_status.rssi;
+    wcode = g_status.wcode; wvalid = g_status.w_valid;
+    temp10 = g_status.temp_x10; wind10 = g_status.wind_x10;
+    upt = g_status.uptime_s; fps = g_status.fps;
+    memcpy(city, g_status.city, sizeof(city));
+    city[sizeof(city) - 1] = 0;
+    statusUnlock();
+
+    statusEase(); // advance the eased page-scroll (snap / fling settle)
+    const float t = spinT;
+    // Dampened user orbit: horizontal drag (ry) pivots the focused widget;
+    // vertical scroll is handled by the per-page world offset below.
+    Rot mG = makeRot(rx * 0.5f, ry * 0.5f, 0.0f);
+    const float sc = statusScroll;
+
+    // Pulse envelopes per page.
+    float p0 = pulseEnv(millis(), pulseMs[0]);
+    float p1 = pulseEnv(millis(), pulseMs[1]);
+    float p2 = pulseEnv(millis(), pulseMs[2]);
+    float p3 = pulseEnv(millis(), pulseMs[3]);
+    float p4 = pulseEnv(millis(), pulseMs[4]);
+
+    // RSSI -> 0..1 level (map -90..-35 dBm).
+    float lvl = 0.0f;
+    if (st == WIFI_CONNECTED && rssi) {
+        lvl = (float)(rssi + 90) / 55.0f;
+        if (lvl < 0) lvl = 0; if (lvl > 1) lvl = 1;
+    }
+
+    // Render each visible page (offset by its distance from the scroll value).
+    for (int page = 0; page < STATUS_PAGES; page++) {
+        float f = (float)page - sc;
+        if (fabsf(f) >= 1.35f) continue;       // fully off-screen
+        float vis = pageVis(f);
+        if (vis <= 0.0f) continue;
+        float oy = f * kSH;                    // world offset for this page
+        switch (page) {
+            case 0: pageWiFi(e_, mG, oy, t, st, lvl, p0, vis); break;
+            case 1: pageRSSI(e_, mG, oy, lvl, p1, vis, rssi, st); break;
+            case 2: pageIP(e_, mG, oy, t, ip, p2, vis); break;
+            case 3: pageWeather(e_, mG, oy, t, wvalid, wcode, temp10, wind10, city, p3, vis);
+                    pageWeatherLabels(e_, mG, oy, t, wvalid, wcode, temp10, wind10, city, vis);
+                    break;
+            case 4: pageUptime(e_, mG, oy, t, upt, fps, p4, vis); break;
+        }
     }
 }
